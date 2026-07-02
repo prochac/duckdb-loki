@@ -38,11 +38,11 @@ timestamp	TIMESTAMP_NS
 line	VARCHAR
 labels	MAP(VARCHAR, VARCHAR)
 
-# endpoint is mandatory in v0.1 (secret-based config is a later version)
+# With no endpoint and no secret, binding fails with a clear message (v0.2).
 statement error
 SELECT * FROM loki_scan('{job="x"}');
 ----
-requires an 'endpoint' parameter
+requires an endpoint
 
 # a query argument is mandatory
 statement error
@@ -54,3 +54,57 @@ statement error
 SELECT * FROM loki_scan('{job="x"}', endpoint := 'http://localhost:3100', "limit" := 0);
 ----
 must be a positive integer
+
+# direction must be 'backward' or 'forward'
+statement error
+SELECT * FROM loki_scan('{job="x"}', endpoint := 'http://localhost:3100', direction := 'sideways');
+----
+must be 'backward' or 'forward'
+
+# INTERVAL time bounds are accepted (offset from now, computed in C++ — no ICU needed).
+# Binding does not touch the network, so DESCRIBE is safe.
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM loki_scan('{job="x"}', endpoint := 'http://localhost:3100', start := -INTERVAL 2 HOUR));
+----
+3
+
+# Month/year intervals are calendar-dependent and rejected with a helpful message.
+statement error
+SELECT * FROM loki_scan('{job="x"}', endpoint := 'http://localhost:3100', start := INTERVAL 1 MONTH);
+----
+calendar-dependent
+
+# --- v0.2 secrets (DESIGN.md §3.1) ---
+
+# A `loki` secret persists endpoint + auth; the table function resolves it by name.
+statement ok
+CREATE SECRET my_loki (
+    TYPE loki,
+    ENDPOINT 'http://localhost:3100',
+    TOKEN 'glc_secret',
+    TENANT '42'
+);
+
+# Endpoint comes from the secret, so none is needed inline; schema is unchanged.
+query II
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM loki_scan('{job="x"}', secret := 'my_loki'));
+----
+timestamp	TIMESTAMP_NS
+line	VARCHAR
+labels	MAP(VARCHAR, VARCHAR)
+
+# Referencing a secret that does not exist errors clearly.
+statement error
+SELECT * FROM loki_scan('{job="x"}', secret := 'does_not_exist');
+----
+no secret named 'does_not_exist'
+
+# A default secret named 'loki' is picked up without an explicit secret := reference.
+statement ok
+CREATE SECRET loki (TYPE loki, ENDPOINT 'http://localhost:3100');
+
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM loki_scan('{job="x"}'));
+----
+3

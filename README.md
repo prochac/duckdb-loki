@@ -5,16 +5,16 @@ with label/time/line-filter pushdown into LogQL, so you can join your logs again
 
 This repository is based on https://github.com/duckdb/extension-template.
 
-> **Status:** early development (roadmap **v0.1**, the walking skeleton). The raw-LogQL
-> `loki_scan()` table function works end-to-end; secrets, paging, projection/filter pushdown,
-> label columns, and discovery helpers are not implemented yet. See [`DESIGN.md`](./DESIGN.md)
-> for the full specification and roadmap.
+> **Status:** early development (roadmap **v0.2**). The raw-LogQL `loki_scan()` table function
+> works end-to-end with **secrets-based auth**, **automatic paging** over Loki's per-request
+> cap, and `TIMESTAMP`/`INTERVAL` time bounds. Projection/filter pushdown, label columns, and
+> discovery helpers are not implemented yet. See [`DESIGN.md`](./DESIGN.md) for the full
+> specification and roadmap.
 
 ## Usage
 
-`loki_scan(query, endpoint := ..., start := ..., end := ..., limit := ...)` runs a raw
-[LogQL](https://grafana.com/docs/loki/latest/query/) log query against Loki's `query_range`
-endpoint and returns one row per log entry:
+`loki_scan(query, ...)` runs a raw [LogQL](https://grafana.com/docs/loki/latest/query/) log
+query against Loki's `query_range` endpoint and returns one row per log entry:
 
 | column      | type                    | notes                                  |
 |-------------|-------------------------|----------------------------------------|
@@ -33,19 +33,46 @@ ORDER BY timestamp;
 Parameters:
 - `query` *(required, positional)* — the LogQL query. Sent to Loki essentially verbatim, so a
   stream selector (e.g. `{job="api"}`) is mandatory — Loki rejects queries without one.
-- `endpoint` *(required)* — `scheme://host[:port]` of the Loki instance. `https://` is
-  supported (TLS via OpenSSL). Secret-based configuration is planned for a later version.
-- `start` / `end` *(optional)* — time bounds as `TIMESTAMP`/`TIMESTAMPTZ`. Default to the last
-  hour ending now; a query is never issued unbounded.
-- `limit` *(optional)* — max entries fetched in the single request (default 5000). Paging over
-  larger result sets is planned for a later version.
+- `endpoint` — `scheme://host[:port]` of the Loki instance. `https://` is supported (TLS via
+  OpenSSL). Required unless a secret provides it (see below).
+- `secret` — name of a `loki` secret to resolve connection + auth from. Falls back to a secret
+  named `loki` if present.
+- `token` / `username` / `password` / `tenant` / `headers` — inline auth overrides (a bearer
+  token, basic-auth credentials, the `X-Scope-OrgID` tenant, or an arbitrary header `MAP`).
+  These take precedence over the secret.
+- `start` / `end` *(optional)* — time bounds as `TIMESTAMP`/`TIMESTAMPTZ` (absolute) or
+  `INTERVAL` (an offset added to `now()`, so `-INTERVAL 2 HOUR` means two hours ago). Default
+  to the last hour ending now; a query is never issued unbounded.
+- `limit` *(optional)* — **total** number of entries returned across all pages (default 5000).
+  The extension pages internally over Loki's per-request cap and de-duplicates page boundaries.
+- `direction` *(optional)* — `'backward'` (newest first, default) or `'forward'`.
 
-> **Caveats (v0.1):**
+### Secrets
+
+Store an endpoint and credentials once with DuckDB's Secret Manager:
+
+```sql
+CREATE SECRET my_loki (
+    TYPE loki,
+    ENDPOINT 'https://logs-prod.example.net',
+    TOKEN 'glc_...',        -- bearer token; or USERNAME + PASSWORD for basic auth
+    TENANT '1234'           -- becomes X-Scope-OrgID for multi-tenant Loki
+);
+
+SELECT timestamp, line
+FROM loki_scan('{job="api"}', secret := 'my_loki', "limit" := 50000, start := -INTERVAL 1 DAY)
+ORDER BY timestamp;
+```
+
+A secret named `loki` is used automatically when `secret :=` is omitted.
+
+> **Caveats (v0.2):**
 > - `end` and `limit` are SQL reserved words, so they must be **double-quoted** when used as
 >   named parameters: `"end" := now()`, `"limit" := 1000`. (`start` needs no quoting.)
-> - Relative bounds like `now() - INTERVAL 2 HOUR` require the built-in **ICU** extension for
->   time-zone-aware timestamp arithmetic (`INSTALL icu; LOAD icu;`). Plain `TIMESTAMP` literals
->   work without it.
+> - `INTERVAL` bounds are computed against `now()` in C++ (no ICU needed). Calendar-dependent
+>   month/year intervals are rejected — pass an absolute `TIMESTAMP` for those. Relative bounds
+>   written as `now() - INTERVAL 2 HOUR` still require the built-in **ICU** extension
+>   (`INSTALL icu; LOAD icu;`) because that arithmetic happens in SQL, not in the extension.
 > - Only log queries are supported; metric LogQL (rates/counts, which return a `matrix`/
 >   `vector`) raises a clear error.
 
@@ -81,6 +108,13 @@ For faster rebuilds, install [ccache](https://ccache.dev/) and
 The primary tests are the SQL tests in `./test/sql`, run with:
 ```sh
 make test
+```
+
+The pure helpers (LogQL/request builders, auth-header builder, streams parser, paging/de-dup
+cursor) also have standalone C++ unit tests that don't need DuckDB or a live Loki:
+```sh
+cmake -B build/unit -S test/cpp && cmake --build build/unit
+ctest --test-dir build/unit --output-on-failure
 ```
 
 ### Installing the deployed binaries

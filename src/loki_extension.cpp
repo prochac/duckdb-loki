@@ -2,6 +2,7 @@
 
 #include "loki_extension.hpp"
 #include "loki/loki_scan.hpp"
+#include "loki/secret.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
@@ -29,15 +30,18 @@ inline void LokiOpenSSLVersionScalarFun(DataChunk &args, ExpressionState &state,
 
 static void LoadInternal(ExtensionLoader &loader) {
 	// Register a scalar function
-	auto loki_scalar_function =
-	    ScalarFunction("loki", {LogicalType::VARCHAR}, LogicalType::VARCHAR, LokiScalarFun);
+	auto loki_scalar_function = ScalarFunction("loki", {LogicalType::VARCHAR}, LogicalType::VARCHAR, LokiScalarFun);
 
 	loader.RegisterFunction(loki_scalar_function);
 
 	// Register another scalar function
 	auto loki_openssl_version_scalar_function = ScalarFunction("loki_openssl_version", {LogicalType::VARCHAR},
-	                                                             LogicalType::VARCHAR, LokiOpenSSLVersionScalarFun);
+	                                                           LogicalType::VARCHAR, LokiOpenSSLVersionScalarFun);
 	loader.RegisterFunction(loki_openssl_version_scalar_function);
+
+	// The `loki` secret type (DESIGN.md §3.1, roadmap v0.2) — must register before the table
+	// functions that resolve it.
+	RegisterLokiSecretType(loader);
 
 	// The real work: the loki_scan(...) table function (DESIGN.md §3.3, roadmap v0.1).
 	RegisterLokiScanFunction(loader);

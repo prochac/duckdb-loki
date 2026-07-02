@@ -32,6 +32,10 @@ set(EXTENSION_SOURCES
     src/loki/http_request.cpp
     src/loki/parse.cpp
     src/loki/http_client.cpp
+    src/loki/auth.cpp
+    src/loki/pager.cpp
+    src/loki/time_bounds.cpp
+    src/loki/secret.cpp
     src/loki/loki_scan.cpp)
 
 # Only the HTTP client TU needs cpp-httplib's TLS path; scope the define to it so the rest

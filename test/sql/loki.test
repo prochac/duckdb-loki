@@ -1,0 +1,56 @@
+# name: test/sql/loki.test
+# description: test loki extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT loki('Sam');
+----
+Catalog Error: Scalar Function with name loki does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require loki
+
+# Confirm the placeholder scalar functions still work
+query I
+SELECT loki('Sam');
+----
+...........🦆 Sam
+
+query I
+SELECT loki_openssl_version('Michael') ILIKE 'Loki Michael, my linked OpenSSL version is OpenSSL%';
+----
+true
+
+# The loki_scan table function is registered
+query I
+SELECT count(*) >= 1 FROM duckdb_functions() WHERE function_name = 'loki_scan';
+----
+true
+
+# It exposes the fixed v0.1 output schema (timestamp, line, labels). Binding does not touch
+# the network, so this is safe without a live Loki.
+query II
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM loki_scan('{job="x"}', endpoint := 'http://localhost:3100'));
+----
+timestamp	TIMESTAMP_NS
+line	VARCHAR
+labels	MAP(VARCHAR, VARCHAR)
+
+# endpoint is mandatory in v0.1 (secret-based config is a later version)
+statement error
+SELECT * FROM loki_scan('{job="x"}');
+----
+requires an 'endpoint' parameter
+
+# a query argument is mandatory
+statement error
+SELECT * FROM loki_scan(endpoint := 'http://localhost:3100');
+----
+
+# limit must be positive ("limit" is a reserved word, so it must be quoted)
+statement error
+SELECT * FROM loki_scan('{job="x"}', endpoint := 'http://localhost:3100', "limit" := 0);
+----
+must be a positive integer

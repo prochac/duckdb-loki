@@ -316,14 +316,38 @@ bool TryInList(ClientContext &context, const LogicalGet &get, LokiScanBindData &
 	return true;
 }
 
-// Try to translate a LIKE/NOT LIKE/regexp_matches call into a line filter (only for `line`).
+// Flip a line-filter op for a NOT-wrapped predicate: `|=`↔`!=`, `|~`↔`!~`.
+loki::LineOp NegateLineOp(loki::LineOp op) {
+	switch (op) {
+	case loki::LineOp::CONTAINS:
+		return loki::LineOp::NOT_CONTAINS;
+	case loki::LineOp::NOT_CONTAINS:
+		return loki::LineOp::CONTAINS;
+	case loki::LineOp::MATCH:
+		return loki::LineOp::NOT_MATCH;
+	case loki::LineOp::NOT_MATCH:
+		return loki::LineOp::MATCH;
+	}
+	return op;
+}
+
+// Try to translate a line predicate into a Loki line filter (only for the `line` column). Handles
+// `regexp_matches`, bare `~~`/`!~~`, and — crucially — the contains/prefix/suffix functions that
+// DuckDB's LIKE optimizer rewrites `line LIKE '%x%'` / `'x%'` / `'%x'` into *before*
+// pushdown_complex_filter runs (so a plain `LIKE` never arrives as `~~`; see the caller for the
+// NOT-wrapping the optimizer adds for NOT LIKE). `negated` is set when the caller unwrapped an
+// enclosing boolean NOT. Without this, line-filter pushdown (DESIGN.md §4.1) silently never fires.
 bool TryFunction(ClientContext &context, const LogicalGet &get, LokiScanBindData &bind_data,
-                 const BoundFunctionExpression &func) {
+                 const BoundFunctionExpression &func, bool negated) {
 	const std::string &fname = func.function.name;
 	const bool is_like = fname == "~~";
 	const bool is_not_like = fname == "!~~";
 	const bool is_regexp = fname == "regexp_matches";
-	if ((!is_like && !is_not_like && !is_regexp) || func.children.size() != 2) {
+	const bool is_contains = fname == "contains";
+	const bool is_prefix = fname == "prefix";
+	const bool is_suffix = fname == "suffix";
+	if ((!is_like && !is_not_like && !is_regexp && !is_contains && !is_prefix && !is_suffix) ||
+	    func.children.size() != 2) {
 		return false;
 	}
 
@@ -342,18 +366,38 @@ bool TryFunction(ClientContext &context, const LogicalGet &get, LokiScanBindData
 		return false;
 	}
 
+	// Compute the positive-sense line filter; all of these are literal, case-sensitive
+	// substring/anchor matches (RE2 for the regex forms), mapping losslessly onto Loki filters.
+	loki::LineOp op;
+	std::string value;
 	if (is_regexp) {
-		// SQL regexp_matches and Loki `|~` are both RE2 partial matches, so this is exact: erase.
-		bind_data.pushed_line_filters.push_back({loki::LineOp::MATCH, pattern.ToString()});
-		return true;
+		op = loki::LineOp::MATCH; // SQL regexp_matches and Loki `|~` are both RE2 partial matches.
+		value = pattern.ToString();
+	} else if (is_contains) {
+		op = loki::LineOp::CONTAINS;
+		value = pattern.ToString();
+	} else if (is_prefix) {
+		op = loki::LineOp::MATCH;
+		value = "^" + loki::RegexEscapeLiteral(pattern.ToString());
+	} else if (is_suffix) {
+		op = loki::LineOp::MATCH;
+		value = loki::RegexEscapeLiteral(pattern.ToString()) + "$";
+	} else {
+		// A bare `~~`/`!~~` the optimizer left alone (e.g. interior wildcards): only a pure `%x%`
+		// substring maps losslessly; anything else stays residual.
+		std::string substring;
+		if (!loki::TryLikeToSubstring(pattern.ToString(), substring)) {
+			return false;
+		}
+		op = loki::LineOp::CONTAINS;
+		value = std::move(substring);
 	}
 
-	// LIKE: only a pure `%substring%` pattern maps losslessly to a `|=`/`!=` substring filter.
-	std::string substring;
-	if (!loki::TryLikeToSubstring(pattern.ToString(), substring)) {
-		return false;
+	// `!~~` negates on its own; an enclosing NOT negates again (they cancel for `NOT (col NOT LIKE …)`).
+	if (negated ^ is_not_like) {
+		op = NegateLineOp(op);
 	}
-	bind_data.pushed_line_filters.push_back({is_like ? loki::LineOp::CONTAINS : loki::LineOp::NOT_CONTAINS, substring});
+	bind_data.pushed_line_filters.push_back({op, std::move(value)});
 	return true;
 }
 
@@ -370,11 +414,21 @@ void LokiPushdownComplexFilter(ClientContext &context, LogicalGet &get, Function
 		case ExpressionClass::BOUND_COMPARISON:
 			consumed = TryComparison(context, get, bind_data, filter->Cast<BoundComparisonExpression>());
 			break;
-		case ExpressionClass::BOUND_OPERATOR:
-			consumed = TryInList(context, get, bind_data, filter->Cast<BoundOperatorExpression>());
+		case ExpressionClass::BOUND_OPERATOR: {
+			auto &op_expr = filter->Cast<BoundOperatorExpression>();
+			// `NOT LIKE` reaches us as `NOT contains/prefix/suffix(line, …)` (the LIKE optimizer
+			// wraps the rewritten function in a boolean NOT); unwrap it and negate the line filter.
+			if (op_expr.GetExpressionType() == ExpressionType::OPERATOR_NOT && op_expr.children.size() == 1 &&
+			    op_expr.children[0]->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+				consumed = TryFunction(context, get, bind_data, op_expr.children[0]->Cast<BoundFunctionExpression>(),
+				                       /*negated=*/true);
+			} else {
+				consumed = TryInList(context, get, bind_data, op_expr);
+			}
 			break;
+		}
 		case ExpressionClass::BOUND_FUNCTION:
-			consumed = TryFunction(context, get, bind_data, filter->Cast<BoundFunctionExpression>());
+			consumed = TryFunction(context, get, bind_data, filter->Cast<BoundFunctionExpression>(), /*negated=*/false);
 			break;
 		default:
 			break;

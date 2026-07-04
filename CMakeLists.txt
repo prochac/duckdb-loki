@@ -37,7 +37,9 @@ set(EXTENSION_SOURCES
     src/loki/time_bounds.cpp
     src/loki/logql.cpp
     src/loki/secret.cpp
-    src/loki/loki_scan.cpp)
+    src/loki/connection.cpp
+    src/loki/loki_scan.cpp
+    src/loki/loki_discovery.cpp)
 
 # Only the HTTP client TU needs cpp-httplib's TLS path; scope the define to it so the rest
 # of the build is unaffected.

@@ -25,6 +25,7 @@ add_executable(loki_unit_tests
     test_time_bounds.cpp
     test_parse.cpp
     test_logql.cpp
+    test_discovery.cpp
     ${REPO_ROOT}/src/loki/http_request.cpp
     ${REPO_ROOT}/src/loki/parse.cpp
     ${REPO_ROOT}/src/loki/auth.cpp

@@ -1,6 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "loki_extension.hpp"
+#include "loki/loki_discovery.hpp"
 #include "loki/loki_scan.hpp"
 #include "loki/secret.hpp"
 #include "duckdb.hpp"
@@ -16,6 +17,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// driven, DESIGN.md §3.2 / §4). The template's placeholder scalar functions were dropped
 	// once the real loki() table function landed.
 	RegisterLokiScanFunction(loader);
+
+	// Discovery helpers (DESIGN.md §3.4, roadmap v0.5): loki_labels / loki_label_values /
+	// loki_series make the source explorable.
+	RegisterLokiDiscoveryFunctions(loader);
 }
 
 void LokiExtension::Load(ExtensionLoader &loader) {

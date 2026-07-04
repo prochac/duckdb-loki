@@ -45,6 +45,14 @@ struct TestRegistrar {
 		}                                                                                                              \
 	} while (0)
 
+#define CHECK_FALSE(cond)                                                                                              \
+	do {                                                                                                               \
+		if ((cond)) {                                                                                                  \
+			std::cerr << "  FAIL: !(" << #cond << ") @ " << __FILE__ << ":" << __LINE__ << "\n";                       \
+			Failures()++;                                                                                              \
+		}                                                                                                              \
+	} while (0)
+
 #define CHECK_EQ(a, b)                                                                                                 \
 	do {                                                                                                               \
 		auto tu_va = (a);                                                                                              \

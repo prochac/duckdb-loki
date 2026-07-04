@@ -1,25 +1,21 @@
 #include "loki/loki_scan.hpp"
 
 #include "loki/auth.hpp"
+#include "loki/connection.hpp"
 #include "loki/http_client.hpp"
 #include "loki/http_request.hpp"
 #include "loki/logql.hpp"
 #include "loki/pager.hpp"
 #include "loki/parse.hpp"
-#include "loki/time_bounds.hpp"
 
-#include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/types/interval.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/table_function.hpp"
-#include "duckdb/main/secret/secret.hpp"
-#include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
@@ -80,77 +76,11 @@ struct LokiScanGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-// Convert a bound TIMESTAMP/TIMESTAMPTZ/VARCHAR parameter to a nanosecond Unix epoch.
-// Casting to TIMESTAMP yields UTC microseconds, which GetEpochNanoSeconds scales to ns.
-int64_t ValueToEpochNs(const Value &value) {
-	Value as_ts = value.DefaultCastAs(LogicalType::TIMESTAMP);
-	auto ts = as_ts.GetValue<timestamp_t>();
-	return Timestamp::GetEpochNanoSeconds(ts);
-}
-
 // Convert a bound timestamp value to an exact nanosecond epoch (no microsecond rounding),
 // used for pushed-down WHERE bounds where the column itself is TIMESTAMP_NS.
 int64_t ValueToEpochNsExact(const Value &value) {
 	Value as_ns = value.DefaultCastAs(LogicalType::TIMESTAMP_NS);
 	return as_ns.GetValueUnsafe<int64_t>();
-}
-
-// Resolve a start/end bound. An INTERVAL is an offset added to now() (so `-INTERVAL 2 HOUR`
-// means two hours ago); any timestamp-like value is taken as an absolute instant.
-int64_t ResolveTimeBound(const Value &value, int64_t now_ns) {
-	if (value.type().id() == LogicalTypeId::INTERVAL) {
-		auto iv = value.GetValue<interval_t>();
-		try {
-			return now_ns + loki::IntervalToNanos(iv.months, iv.days, iv.micros);
-		} catch (const std::exception &e) {
-			throw BinderException(e.what());
-		}
-	}
-	return ValueToEpochNs(value);
-}
-
-// Extract key/value pairs from a MAP(VARCHAR, VARCHAR) Value into a header list.
-void AppendHeadersFromMap(const Value &map_value, std::vector<std::pair<std::string, std::string>> &out) {
-	if (map_value.IsNull()) {
-		return;
-	}
-	for (const auto &entry : ListValue::GetChildren(map_value)) {
-		auto kv = StructValue::GetChildren(entry);
-		out.emplace_back(kv[0].ToString(), kv[1].ToString());
-	}
-}
-
-// Look up a named parameter, returning nullptr when absent or explicitly NULL.
-const Value *FindParam(TableFunctionBindInput &input, const char *name) {
-	auto it = input.named_parameters.find(name);
-	if (it == input.named_parameters.end() || it->second.IsNull()) {
-		return nullptr;
-	}
-	return &it->second;
-}
-
-// Copy a `loki` secret's fields into the connection config being assembled.
-void ReadLokiSecret(const KeyValueSecret &kv, std::string &endpoint, loki::AuthConfig &auth,
-                    std::vector<std::pair<std::string, std::string>> &headers) {
-	Value v;
-	if (kv.TryGetValue("endpoint", v) && !v.IsNull()) {
-		endpoint = v.ToString();
-	}
-	if (kv.TryGetValue("token", v) && !v.IsNull()) {
-		auth.token = v.ToString();
-	}
-	if (kv.TryGetValue("username", v) && !v.IsNull()) {
-		auth.username = v.ToString();
-	}
-	if (kv.TryGetValue("password", v) && !v.IsNull()) {
-		auth.password = v.ToString();
-	}
-	if (kv.TryGetValue("tenant", v) && !v.IsNull()) {
-		auth.tenant = v.ToString();
-	}
-	if (kv.TryGetValue("headers", v)) {
-		AppendHeadersFromMap(v, headers);
-	}
 }
 
 // Shared bind work for loki_scan (raw) and loki (pushdown): resolve the connection/auth from a
@@ -159,67 +89,16 @@ void ReadLokiSecret(const KeyValueSecret &kv, std::string &endpoint, loki::AuthC
 // or `base_selector`) before calling this. The function name for error messages is `fn`.
 void LokiResolveCommon(ClientContext &context, TableFunctionBindInput &input, LokiScanBindData &result,
                        vector<LogicalType> &return_types, vector<string> &names, const char *fn) {
-	// --- Resolve connection config: a `loki` secret, refined by inline overrides. ---
-	std::string endpoint;
-	std::vector<std::pair<std::string, std::string>> secret_headers;
+	ResolveLokiConnection(context, input, result.endpoint, result.auth, fn);
 
-	auto &secret_manager = SecretManager::Get(context);
-	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	if (auto *secret_param = FindParam(input, "secret")) {
-		// Explicit secret name — must exist.
-		auto name = secret_param->ToString();
-		auto entry = secret_manager.GetSecretByName(transaction, name);
-		if (!entry) {
-			throw BinderException("%s: no secret named '%s' found", fn, name);
-		}
-		ReadLokiSecret(dynamic_cast<const KeyValueSecret &>(*entry->secret), endpoint, result.auth, secret_headers);
-	} else if (auto entry = secret_manager.GetSecretByName(transaction, "loki")) {
-		// No explicit secret: fall back to a default secret named "loki" if one exists.
-		ReadLokiSecret(dynamic_cast<const KeyValueSecret &>(*entry->secret), endpoint, result.auth, secret_headers);
-	}
-
-	// Inline overrides take precedence over the secret.
-	if (auto *p = FindParam(input, "endpoint")) {
-		endpoint = p->ToString();
-	}
-	if (auto *p = FindParam(input, "token")) {
-		result.auth.token = p->ToString();
-	}
-	if (auto *p = FindParam(input, "username")) {
-		result.auth.username = p->ToString();
-	}
-	if (auto *p = FindParam(input, "password")) {
-		result.auth.password = p->ToString();
-	}
-	if (auto *p = FindParam(input, "tenant")) {
-		result.auth.tenant = p->ToString();
-	}
-	if (auto *p = FindParam(input, "headers")) {
-		// Inline headers replace the secret's headers.
-		secret_headers.clear();
-		AppendHeadersFromMap(*p, secret_headers);
-	}
-	result.auth.extra_headers = std::move(secret_headers);
-
-	if (endpoint.empty()) {
-		throw BinderException("%s requires an endpoint: pass endpoint := 'http://localhost:3100' or "
-		                      "reference a secret (secret := 'my_loki', or a default secret named 'loki') "
-		                      "created with CREATE SECRET (TYPE loki, ENDPOINT ...)",
-		                      fn);
-	}
-	while (!endpoint.empty() && endpoint.back() == '/') {
-		endpoint.pop_back();
-	}
-	result.endpoint = std::move(endpoint);
-
-	if (auto *p = FindParam(input, "limit")) {
+	if (auto *p = FindNamedParam(input, "limit")) {
 		result.limit = p->GetValue<int64_t>();
 		if (result.limit <= 0) {
 			throw BinderException("%s 'limit' must be a positive integer", fn);
 		}
 	}
 
-	if (auto *p = FindParam(input, "direction")) {
+	if (auto *p = FindNamedParam(input, "direction")) {
 		result.direction = StringUtil::Lower(p->ToString());
 		if (result.direction != "backward" && result.direction != "forward") {
 			throw BinderException("%s 'direction' must be 'backward' or 'forward'", fn);
@@ -230,11 +109,11 @@ void LokiResolveCommon(ClientContext &context, TableFunctionBindInput &input, Lo
 	int64_t now_ns = Timestamp::GetEpochNanoSeconds(Timestamp::GetCurrentTimestamp());
 	result.end_ns = now_ns;
 	result.start_ns = now_ns - NANOS_PER_HOUR;
-	if (auto *p = FindParam(input, "start")) {
+	if (auto *p = FindNamedParam(input, "start")) {
 		result.start_ns = ResolveTimeBound(*p, now_ns);
 		result.has_param_start = true;
 	}
-	if (auto *p = FindParam(input, "end")) {
+	if (auto *p = FindNamedParam(input, "end")) {
 		result.end_ns = ResolveTimeBound(*p, now_ns);
 		result.has_param_end = true;
 	}
@@ -242,7 +121,7 @@ void LokiResolveCommon(ClientContext &context, TableFunctionBindInput &input, Lo
 	// `labels := ['job','level']` promotes each named label to a top-level VARCHAR column so its
 	// values are directly selectable and (for loki()) its predicates are pushable. Unlisted labels
 	// still appear inside the `labels` MAP. See DESIGN.md §3.2 / §4.2.
-	if (auto *p = FindParam(input, "labels")) {
+	if (auto *p = FindNamedParam(input, "labels")) {
 		for (const auto &child : ListValue::GetChildren(*p)) {
 			if (child.IsNull()) {
 				throw BinderException("%s 'labels' must not contain NULL entries", fn);
@@ -288,7 +167,7 @@ unique_ptr<FunctionData> LokiBind(ClientContext &context, TableFunctionBindInput
 	// `selector := '{job="api"}'` is the base stream selector (DESIGN.md §3.2). It may be omitted
 	// when pushdown can synthesize at least one matcher from WHERE (§4.3), so it is optional here;
 	// the mandatory-selector rule is enforced at scan start once pushdown has run.
-	if (auto *p = FindParam(input, "selector")) {
+	if (auto *p = FindNamedParam(input, "selector")) {
 		result->base_selector = p->ToString();
 	}
 

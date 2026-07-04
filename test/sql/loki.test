@@ -11,11 +11,17 @@ loki_scan
 # Require statement will ensure this test is run with this extension loaded
 require loki
 
-# Both table functions are registered.
+# Both scan table functions plus the three discovery helpers are registered.
 query I
 SELECT count(*) FROM duckdb_functions() WHERE function_name IN ('loki_scan', 'loki') AND function_type = 'table';
 ----
 2
+
+query I
+SELECT count(*) FROM duckdb_functions()
+WHERE function_name IN ('loki_labels', 'loki_label_values', 'loki_series') AND function_type = 'table';
+----
+3
 
 # It exposes the base output schema (timestamp, line, labels, structured_metadata). Binding
 # does not touch the network, so this is safe without a live Loki.
@@ -140,3 +146,46 @@ query I
 SELECT count(*) FROM (DESCRIBE SELECT * FROM loki_scan('{job="x"}'));
 ----
 4
+
+# --- v0.5 discovery helpers (DESIGN.md §3.4) ---
+
+# loki_labels exposes a single `label` VARCHAR column. Binding is offline, so DESCRIBE is safe
+# (the endpoint comes from the default `loki` secret created above).
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM loki_labels());
+----
+label	VARCHAR
+
+# loki_label_values takes a label name and exposes a single `value` VARCHAR column.
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM loki_label_values('job'));
+----
+value	VARCHAR
+
+# loki_series takes a selector and exposes a `labels` MAP column (one row per matching series).
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM loki_series('{job="api"}'));
+----
+labels	MAP(VARCHAR, VARCHAR)
+
+# The discovery helpers share connection resolution: an unknown secret errors clearly.
+statement error
+SELECT * FROM loki_labels(secret := 'does_not_exist');
+----
+no secret named 'does_not_exist'
+
+# loki_label_values requires the label-name argument.
+statement error
+SELECT * FROM loki_label_values(endpoint := 'http://localhost:3100');
+----
+
+# loki_series requires the selector argument (Loki rejects /series without one).
+statement error
+SELECT * FROM loki_series(endpoint := 'http://localhost:3100');
+----
+
+# start/end time bounds are accepted on discovery calls (offset-from-now INTERVAL, computed in C++).
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM loki_labels(start := -INTERVAL 1 DAY));
+----
+1

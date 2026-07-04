@@ -5,22 +5,34 @@ with label/time/line-filter pushdown into LogQL, so you can join your logs again
 
 This repository is based on https://github.com/duckdb/extension-template.
 
-> **Status:** early development (roadmap **v0.2**). The raw-LogQL `loki_scan()` table function
-> works end-to-end with **secrets-based auth**, **automatic paging** over Loki's per-request
-> cap, and `TIMESTAMP`/`INTERVAL` time bounds. Projection/filter pushdown, label columns, and
-> discovery helpers are not implemented yet. See [`DESIGN.md`](./DESIGN.md) for the full
-> specification and roadmap.
+> **Status:** early development (roadmap **v0.5**). Working end-to-end: the raw-LogQL
+> `loki_scan()` function, the pushdown-driven `loki()` function (label/time/line-filter
+> pushdown into LogQL), promoted **label columns**, **projection pushdown**,
+> **structured metadata**, the `loki_labels` / `loki_label_values` / `loki_series` discovery
+> helpers, **secrets-based auth**, and **automatic paging** over Loki's per-request cap. Still
+> to come: cross-platform publishing (v1.0) and `ATTACH` (v1.1). See [`DESIGN.md`](./DESIGN.md)
+> for the full specification and roadmap.
 
 ## Usage
 
-`loki_scan(query, ...)` runs a raw [LogQL](https://grafana.com/docs/loki/latest/query/) log
-query against Loki's `query_range` endpoint and returns one row per log entry:
+There are two log-query table functions:
 
-| column      | type                    | notes                                  |
-|-------------|-------------------------|----------------------------------------|
-| `timestamp` | `TIMESTAMP_NS` (UTC)    | nanosecond precision preserved         |
-| `line`      | `VARCHAR`               | the raw log line                       |
-| `labels`    | `MAP(VARCHAR, VARCHAR)` | the stream's labels                    |
+- **`loki_scan(query, ...)`** — send a raw [LogQL](https://grafana.com/docs/loki/latest/query/)
+  query through essentially verbatim. Full LogQL control, no predicate translation.
+- **`loki(selector := ..., ...)`** — a base stream selector that SQL `WHERE` predicates *refine*:
+  filters on promoted label columns, `timestamp`, and `line` are translated into the LogQL
+  selector, time bounds, and line filters (everything else is applied by DuckDB). See the
+  **Pushdown** section below.
+
+Both return one row per log entry with the same schema:
+
+| column                | type                    | notes                                       |
+|-----------------------|-------------------------|---------------------------------------------|
+| `timestamp`           | `TIMESTAMP_NS` (UTC)    | nanosecond precision preserved              |
+| `line`                | `VARCHAR`               | the raw log line                            |
+| *one per promoted label* | `VARCHAR`            | from `labels := [...]`; NULL where missing  |
+| `labels`              | `MAP(VARCHAR, VARCHAR)` | the stream's labels                         |
+| `structured_metadata` | `MAP(VARCHAR, VARCHAR)` | per-entry structured metadata (newer Loki)  |
 
 ```sql
 LOAD loki;
@@ -31,8 +43,14 @@ ORDER BY timestamp;
 ```
 
 Parameters:
-- `query` *(required, positional)* — the LogQL query. Sent to Loki essentially verbatim, so a
-  stream selector (e.g. `{job="api"}`) is mandatory — Loki rejects queries without one.
+- `query` *(`loki_scan` only, required, positional)* — the LogQL query. Sent to Loki
+  essentially verbatim, so a stream selector (e.g. `{job="api"}`) is mandatory — Loki rejects
+  queries without one.
+- `selector` *(`loki` only)* — the base stream selector that `WHERE` predicates refine. May be
+  omitted if a `WHERE` equality/IN on a promoted label can synthesize one; otherwise required.
+- `labels` *(optional)* — a `LIST` of label names to promote to top-level `VARCHAR` columns
+  (e.g. `labels := ['job','level']`). For `loki()` this is what makes a label's `WHERE`
+  predicates pushable (§4.2); unlisted labels still appear inside the `labels` MAP.
 - `endpoint` — `scheme://host[:port]` of the Loki instance. `https://` is supported (TLS via
   OpenSSL). Required unless a secret provides it (see below).
 - `secret` — name of a `loki` secret to resolve connection + auth from. Falls back to a secret
@@ -75,6 +93,68 @@ A secret named `loki` is used automatically when `secret :=` is omitted.
 >   (`INSTALL icu; LOAD icu;`) because that arithmetic happens in SQL, not in the extension.
 > - Only log queries are supported; metric LogQL (rates/counts, which return a `matrix`/
 >   `vector`) raises a clear error.
+
+## Pushdown — `loki()`
+
+`loki()` takes a base `selector` and lets DuckDB's `WHERE` clause refine it. Predicates that
+Loki can execute are translated and pushed down; everything else is left for DuckDB to apply
+after the scan, so results are always correct.
+
+```sql
+SELECT timestamp, level, line
+FROM loki(
+    selector := '{job="api"}',
+    labels   := ['level','pod'],       -- promote these labels to columns so they're pushable
+    endpoint := 'http://localhost:3100'
+)
+WHERE level = 'error'                          -- → selector matcher {level="error"}
+  AND timestamp >= TIMESTAMP '2026-07-04 00:00:00'  -- → start bound
+  AND line LIKE '%timeout%'                    -- → line filter |= "timeout"
+  AND length(line) > 200;                      -- → residual, applied by DuckDB
+```
+
+| SQL predicate (on a declared column) | pushed to Loki as        |
+|--------------------------------------|--------------------------|
+| `label = 'v'`                        | `{label="v"}`            |
+| `label IN ('a','b')`                 | `{label=~"a\|b"}`        |
+| `timestamp >= X` / `<= Y`            | `start` / `end` bound    |
+| `line LIKE '%sub%'`                  | `\|= "sub"` line filter  |
+| `regexp_matches(line, 're')`         | `\|~ "re"` line filter   |
+| anything else                        | residual (DuckDB applies)|
+
+Loki refuses a query with no stream selector, so `loki()` needs either a `selector` argument or
+a `WHERE` equality/IN on a promoted label to synthesize one — otherwise it raises a clear error.
+
+### Loki as a table — a view over `loki()`
+
+Because DuckDB pushes a view's predicates down into the underlying table function, a plain view
+over `loki()` gives the `FROM logs WHERE ...` experience with full pushdown and no extra setup:
+
+```sql
+CREATE VIEW logs AS
+    SELECT * FROM loki(selector := '{job=~".+"}', labels := ['job','level']);
+
+SELECT timestamp, line
+FROM logs
+WHERE job = 'api' AND level = 'error'          -- pushed through the view into loki()'s pushdown
+  AND timestamp >= TIMESTAMP '2026-07-04 00:00:00';
+```
+
+## Discovery helpers
+
+Explore what's in Loki without hand-writing API calls:
+
+```sql
+SELECT * FROM loki_labels();                    -- all label names → column `label`
+SELECT * FROM loki_label_values('job');         -- values for one label → column `value`
+SELECT * FROM loki_series('{job="api"}');       -- matching series → column `labels` (MAP)
+```
+
+- `loki_label_values(name, ...)` accepts an optional `query := '{job="api"}'` selector to
+  restrict which series contribute values.
+- `loki_series(match, ...)` requires a selector — Loki rejects `/series` without one.
+- All three resolve a `loki` secret (with inline overrides) like the scan functions, and accept
+  optional `start` / `end` bounds. When omitted, Loki applies its own default window.
 
 ## Building
 

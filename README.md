@@ -197,6 +197,16 @@ cmake -B build/unit -S test/cpp && cmake --build build/unit
 ctest --test-dir build/unit --output-on-failure
 ```
 
+There is also an end-to-end integration test in `./test/integration` that runs the built
+extension against a real Grafana Loki in Docker — it seeds known log lines and asserts that
+selector/label/time/line-filter pushdown returns exactly them. It needs `docker`, `curl`, and
+`jq`:
+```sh
+./test/integration/run.sh
+```
+See [`test/integration/README.md`](test/integration/README.md) for details. It also runs in CI
+on demand via the **Integration (Docker Loki)** workflow.
+
 ### Installing the deployed binaries
 To install extension binaries from a custom repository, launch DuckDB with
 `allow_unsigned_extensions` set to true.

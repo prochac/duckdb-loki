@@ -1,0 +1,56 @@
+#
+# Optional integration test (DESIGN.md §8): build the extension, spin up a real Grafana Loki via
+# docker compose, seed known log lines, and assert selector/label/time/line-filter pushdown returns
+# exactly them — plus that loki() (pushdown) and loki_scan() (raw LogQL) agree.
+#
+# Manual-only: it builds DuckDB from source (slow) and needs Docker, so it does not run on every
+# push. Trigger it from the Actions tab (workflow_dispatch).
+#
+name: Integration (Docker Loki)
+on:
+  workflow_dispatch:
+
+jobs:
+  loki-integration:
+    name: Pushdown against a real Loki
+    runs-on: ubuntu-latest
+    env:
+      GEN: ninja
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      VCPKG_TARGET_TRIPLET: x64-linux
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tooling
+        run: sudo apt-get update -y && sudo apt-get install -y ninja-build ccache jq
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@main
+        with:
+          key: loki-integration
+          max-size: 500M
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11.5
+        with:
+          vcpkgGitCommitId: 84bab45d415d22042bd0b9081aea57f362da3f35
+
+      - name: Build extension
+        run: make
+
+      - name: Start Loki
+        run: docker compose -f test/integration/docker-compose.yml up -d
+
+      - name: Run integration assertions
+        # KEEP_LOKI: the workflow owns the compose lifecycle so logs/teardown are separate steps.
+        run: KEEP_LOKI=1 ./test/integration/run.sh
+
+      - name: Loki logs (on failure)
+        if: failure()
+        run: docker compose -f test/integration/docker-compose.yml logs
+
+      - name: Teardown Loki
+        if: always()
+        run: docker compose -f test/integration/docker-compose.yml down -v

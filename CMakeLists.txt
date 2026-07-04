@@ -35,6 +35,7 @@ set(EXTENSION_SOURCES
     src/loki/auth.cpp
     src/loki/pager.cpp
     src/loki/time_bounds.cpp
+    src/loki/logql.cpp
     src/loki/secret.cpp
     src/loki/loki_scan.cpp)
 

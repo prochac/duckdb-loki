@@ -24,11 +24,13 @@ add_executable(loki_unit_tests
     test_pager.cpp
     test_time_bounds.cpp
     test_parse.cpp
+    test_logql.cpp
     ${REPO_ROOT}/src/loki/http_request.cpp
     ${REPO_ROOT}/src/loki/parse.cpp
     ${REPO_ROOT}/src/loki/auth.cpp
     ${REPO_ROOT}/src/loki/pager.cpp
-    ${REPO_ROOT}/src/loki/time_bounds.cpp)
+    ${REPO_ROOT}/src/loki/time_bounds.cpp
+    ${REPO_ROOT}/src/loki/logql.cpp)
 
 target_include_directories(loki_unit_tests PRIVATE ${REPO_ROOT}/src/include)
 target_link_libraries(loki_unit_tests yyjson::yyjson)

@@ -2,31 +2,20 @@
 # description: test loki extension
 # group: [sql]
 
-# Before we load the extension, this will fail
+# Before the extension is loaded, its table functions do not exist.
 statement error
-SELECT loki('Sam');
+SELECT * FROM loki_scan('{job="x"}', endpoint := 'http://localhost:3100');
 ----
-Catalog Error: Scalar Function with name loki does not exist!
+loki_scan
 
 # Require statement will ensure this test is run with this extension loaded
 require loki
 
-# Confirm the placeholder scalar functions still work
+# Both table functions are registered.
 query I
-SELECT loki('Sam');
+SELECT count(*) FROM duckdb_functions() WHERE function_name IN ('loki_scan', 'loki') AND function_type = 'table';
 ----
-...........🦆 Sam
-
-query I
-SELECT loki_openssl_version('Michael') ILIKE 'Loki Michael, my linked OpenSSL version is OpenSSL%';
-----
-true
-
-# The loki_scan table function is registered
-query I
-SELECT count(*) >= 1 FROM duckdb_functions() WHERE function_name = 'loki_scan';
-----
-true
+2
 
 # It exposes the base output schema (timestamp, line, labels, structured_metadata). Binding
 # does not touch the network, so this is safe without a live Loki.
@@ -51,6 +40,34 @@ job	VARCHAR
 pod	VARCHAR
 labels	MAP(VARCHAR, VARCHAR)
 structured_metadata	MAP(VARCHAR, VARCHAR)
+
+# --- v0.4: the pushdown-driven loki() table function (DESIGN.md §3.2 / §4) ---
+
+# loki() exposes the same schema as loki_scan; `selector` is the base stream selector and
+# `labels := [...]` promotes label columns (which is what makes their WHERE predicates pushable).
+query II
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM loki(selector := '{job="x"}', endpoint := 'http://localhost:3100', labels := ['level']));
+----
+timestamp	TIMESTAMP_NS
+line	VARCHAR
+level	VARCHAR
+labels	MAP(VARCHAR, VARCHAR)
+structured_metadata	MAP(VARCHAR, VARCHAR)
+
+# The mandatory-selector rule (§4.3): with no selector and no WHERE to synthesize one, the scan
+# refuses to issue an unbounded query. Raised at scan start, before any network call.
+statement error
+SELECT * FROM loki(endpoint := 'http://localhost:3100');
+----
+stream selector is required
+
+# loki() shares loki_scan's connection resolution: no endpoint and no secret is an error. This
+# runs before any `loki` secret is created below, so nothing supplies the endpoint.
+statement error
+SELECT * FROM loki(selector := '{job="x"}');
+----
+requires an endpoint
 
 # With no endpoint and no secret, binding fails with a clear message (v0.2).
 statement error

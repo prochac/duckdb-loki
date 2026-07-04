@@ -197,6 +197,23 @@ cmake -B build/unit -S test/cpp && cmake --build build/unit
 ctest --test-dir build/unit --output-on-failure
 ```
 
+For end-to-end SQL without a live Loki, `./test/mock` runs the SQL tests against a tiny
+in-process Python mock of the Loki API. It's deterministic (no network) and, via a
+request-echo mode, asserts exactly which `WHERE` predicates get translated into the LogQL
+query — the guard for filter-pushdown *translation*. Needs only `python3`:
+```sh
+./test/mock/run.sh
+```
+
+All of the above drive a build with the extension **statically linked in**. To smoke-test the
+actual shipped **loadable binary**, `./test/loadable` `LOAD`s it into a *stock* DuckDB CLI (one
+without loki compiled in) and checks it loads unsigned and registers working functions — the path
+real users take outside the signed community repo. Needs a stock `duckdb` CLI matching the build's
+version:
+```sh
+DUCKDB=/path/to/stock/duckdb ./test/loadable/run.sh
+```
+
 There is also an end-to-end integration test in `./test/integration` that runs the built
 extension against a real Grafana Loki in Docker — it seeds known log lines and asserts that
 selector/label/time/line-filter pushdown returns exactly them. It needs `docker`, `curl`, and

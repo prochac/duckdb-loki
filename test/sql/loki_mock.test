@@ -1,0 +1,225 @@
+# name: test/sql/loki_mock.test
+# description: End-to-end SQL against a mock Loki HTTP server (DESIGN.md §8) — streams parsing,
+#              projection / label promotion, error surfacing, discovery, and (the point of the
+#              file) filter-pushdown *translation* asserted via the mock's request-echo mode.
+# group: [sql]
+#
+# This test needs the mock server running and its base URL in ${LOKI_MOCK_URL}; test/mock/run.sh
+# starts it and sets that. Under a plain `make test` the env var is unset, so require-env skips
+# the whole file — it never fails just because the mock isn't up.
+
+require-env LOKI_MOCK_URL
+
+require loki
+
+# ============================================================================================
+# Streams parsing (loki_scan → GET /query_range → ParseStreamsResponse), against the canonical
+# `__stream__` fixture: two streams, three entries, rich labels + structured metadata.
+# ============================================================================================
+
+query I
+SELECT count(*) FROM loki_scan('{job="__stream__"}', endpoint := '${LOKI_MOCK_URL}');
+----
+3
+
+# Nanosecond precision is preserved end-to-end: the extension writes raw ns into TIMESTAMP_NS
+# (not rescaled to microseconds), so epoch_ns round-trips the exact 19-digit fixture values.
+query I
+SELECT epoch_ns(timestamp) FROM loki_scan('{job="__stream__"}', endpoint := '${LOKI_MOCK_URL}') ORDER BY timestamp;
+----
+1700000000000000001
+1700000000000000002
+1700000000000000003
+
+query I
+SELECT line FROM loki_scan('{job="__stream__"}', endpoint := '${LOKI_MOCK_URL}') ORDER BY timestamp;
+----
+boom one
+boom two
+hello world
+
+# All entries carry their stream's labels in the `labels` MAP.
+query I
+SELECT DISTINCT labels['job'] FROM loki_scan('{job="__stream__"}', endpoint := '${LOKI_MOCK_URL}');
+----
+api
+
+# Per-entry structured metadata is surfaced (categorize-labels): present, empty, and multi-key.
+query II
+SELECT structured_metadata['trace_id'], cardinality(structured_metadata)
+FROM loki_scan('{job="__stream__"}', endpoint := '${LOKI_MOCK_URL}') ORDER BY timestamp;
+----
+t-aaa	1
+NULL	0
+t-bbb	2
+
+# Label promotion (labels := [...]): each named label becomes a top-level VARCHAR column,
+# sparse (NULL where a stream lacks it — here every stream has both).
+query III
+SELECT level, pod, line
+FROM loki_scan('{job="__stream__"}', endpoint := '${LOKI_MOCK_URL}', labels := ['level', 'pod'])
+ORDER BY timestamp;
+----
+error	api-1	boom one
+error	api-1	boom two
+info	api-2	hello world
+
+# A valid streams response with no results yields zero rows (not an error).
+query I
+SELECT count(*) FROM loki_scan('{job="__empty__"}', endpoint := '${LOKI_MOCK_URL}');
+----
+0
+
+# A non-2xx Loki response surfaces the HTTP status and the error body.
+statement error
+SELECT * FROM loki_scan('{job="__error__"}', endpoint := '${LOKI_MOCK_URL}');
+----
+Loki returned HTTP 400
+
+# ============================================================================================
+# Filter-pushdown translation (loki() + WHERE). The mock echoes back the LogQL the extension
+# built as the row's `line` (and the request params as structured metadata), so we can assert
+# exactly what WHERE predicates were pushed into the LogQL query — the whole reason this is C++.
+# ============================================================================================
+
+# Base selector, no WHERE: sent verbatim.
+query I
+SELECT line FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}');
+----
+{job="__echo__"}
+
+# `label = 'v'` on a promoted column → selector matcher, and the predicate is consumed.
+query I
+SELECT line FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}', labels := ['level'])
+WHERE level = 'error';
+----
+{job="__echo__", level="error"}
+
+# `label IN (...)` → an anchored regex matcher `l=~"a|b"`.
+query I
+SELECT line FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}', labels := ['level'])
+WHERE level IN ('error', 'warn');
+----
+{job="__echo__", level=~"error|warn"}
+
+# `label != 'v'` is pushed as a coarse `!=` matcher but kept residual (Loki `!=` also matches
+# label-missing streams); the echo row has level="info" so it survives DuckDB's re-filtering.
+query I
+SELECT line FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}', labels := ['level'])
+WHERE level != 'error';
+----
+{job="__echo__", level!="error"}
+
+# `line LIKE '%sub%'` (pure substring) → a `|=` line filter, consumed. NOTE: DuckDB's LIKE
+# optimizer rewrites this to contains(line,'timeout') before pushdown; the extension translates
+# that (and prefix/suffix below) so line-filter pushdown actually fires. Echo mode confirms the
+# filter reached the LogQL — the returned `line` IS the pushed query, so the row survives.
+query I
+SELECT line FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}')
+WHERE line LIKE '%timeout%';
+----
+{job="__echo__"} |= "timeout"
+
+# `line LIKE 'pre%'` → start-anchored regex `|~ "^pre"` (via the prefix() rewrite).
+query I
+SELECT line FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}')
+WHERE line LIKE 'abc%';
+----
+{job="__echo__"} |~ "^abc"
+
+# `line LIKE '%post'` → end-anchored regex `|~ "post$"` (via the suffix() rewrite).
+query I
+SELECT line FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}')
+WHERE line LIKE '%xyz';
+----
+{job="__echo__"} |~ "xyz$"
+
+# `line NOT LIKE '%sub%'` → a `!=` line filter. DuckDB rewrites this to NOT contains(line,'boom');
+# the extension unwraps the boolean NOT and negates the pushed filter.
+query I
+SELECT line FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}')
+WHERE line NOT LIKE '%boom%';
+----
+{job="__echo__"} != "boom"
+
+# `line NOT LIKE 'pre%'` → the negated anchored regex `!~ "^abc"` (NOT prefix(line,'abc')).
+query I
+SELECT line FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}')
+WHERE line NOT LIKE 'abc%';
+----
+{job="__echo__"} !~ "^abc"
+
+# `regexp_matches(line, 're')` → a `|~` regex line filter (RE2 → RE2, sent as-is).
+query I
+SELECT line LIKE '%|~ "foo.*bar"%'
+FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}')
+WHERE regexp_matches(line, 'foo.*bar');
+----
+true
+
+# `timestamp >= X` → the `start` bound (pushed, kept residual). The echo row's ts equals the
+# received start, so the residual `>= X` still matches. Assert the exact ns the extension sent.
+query I
+SELECT structured_metadata['req_start'] = CAST(epoch_ns(TIMESTAMP '2023-06-01 00:00:00') AS VARCHAR)
+FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}')
+WHERE timestamp >= TIMESTAMP '2023-06-01 00:00:00';
+----
+true
+
+# Explicit start/end params also reach the request as ns epochs.
+query II
+SELECT structured_metadata['req_start'] = CAST(epoch_ns(TIMESTAMP '2023-01-01 00:00:00') AS VARCHAR),
+       structured_metadata['req_end'] = CAST(epoch_ns(TIMESTAMP '2023-01-01 01:00:00') AS VARCHAR)
+FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}',
+          start := TIMESTAMP '2023-01-01 00:00:00', "end" := TIMESTAMP '2023-01-01 01:00:00');
+----
+true	true
+
+# `limit` and `direction` params reach the request; both default when unset.
+query II
+SELECT structured_metadata['req_limit'], structured_metadata['req_direction']
+FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}', "limit" := 123, direction := 'forward');
+----
+123	forward
+
+query II
+SELECT structured_metadata['req_limit'], structured_metadata['req_direction']
+FROM loki(selector := '{job="__echo__"}', endpoint := '${LOKI_MOCK_URL}');
+----
+5000	backward
+
+# Secret-resolved auth reaches the wire: a bearer token becomes Authorization: Bearer, and
+# TENANT becomes X-Scope-OrgID. Validated end-to-end (previously only in C++ unit tests).
+statement ok
+CREATE SECRET mock_auth (TYPE loki, ENDPOINT '${LOKI_MOCK_URL}', TOKEN 'glc_secret', TENANT '77');
+
+query II
+SELECT structured_metadata['req_auth'], structured_metadata['req_tenant']
+FROM loki(selector := '{job="__echo__"}', secret := 'mock_auth');
+----
+bearer	77
+
+# ============================================================================================
+# Discovery helpers (DESIGN.md §3.4) return actual rows, not just a bind-time schema.
+# ============================================================================================
+
+query I
+SELECT label FROM loki_labels(endpoint := '${LOKI_MOCK_URL}') ORDER BY label;
+----
+job
+level
+pod
+
+query I
+SELECT value FROM loki_label_values('job', endpoint := '${LOKI_MOCK_URL}') ORDER BY value;
+----
+api
+web
+
+query II
+SELECT labels['job'], labels['level']
+FROM loki_series('{job="api"}', endpoint := '${LOKI_MOCK_URL}')
+ORDER BY labels['level'];
+----
+api	error
+api	info

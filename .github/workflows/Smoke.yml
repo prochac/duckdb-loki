@@ -1,0 +1,60 @@
+#
+# Deterministic, no-service extension smoke tests (DESIGN.md §8). Builds the extension once, then:
+#   1. runs test/sql/loki_mock.test against a tiny in-process Python mock of the Loki API — the
+#      guard for filter-pushdown *translation* (WHERE → LogQL), streams parsing, and discovery;
+#   2. LOADs the shipped loadable artifact into a *stock* DuckDB CLI (one without loki linked) and
+#      checks it registers working functions — the guard for the unsigned-LOAD / packaging path.
+# Unlike the Docker integration test these need no services, so they run on every push and PR.
+#
+name: Extension smoke tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DUCKDB_VERSION: v1.5.4 # keep in sync with MainDistributionPipeline.yml
+
+jobs:
+  smoke:
+    name: Mock sqllogictest + loadable-binary smoke
+    runs-on: ubuntu-latest
+    env:
+      GEN: ninja
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      VCPKG_TARGET_TRIPLET: x64-linux
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tooling
+        run: sudo apt-get update -y && sudo apt-get install -y ninja-build ccache
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@main
+        with:
+          key: loki-mock
+          max-size: 500M
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11.5
+        with:
+          vcpkgGitCommitId: 84bab45d415d22042bd0b9081aea57f362da3f35
+
+      - name: Build extension
+        run: make
+
+      - name: Run mock sqllogictest
+        run: ./test/mock/run.sh
+
+      # A stock DuckDB CLI (the official release — no loki linked, exactly what end users LOAD into).
+      - name: Fetch stock DuckDB CLI
+        run: |
+          curl -fL -o /tmp/duckdb_cli.zip \
+            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip"
+          unzip -o /tmp/duckdb_cli.zip -d /tmp/duckdb_cli
+
+      - name: Smoke-test loadable binary
+        run: DUCKDB=/tmp/duckdb_cli/duckdb ./test/loadable/run.sh

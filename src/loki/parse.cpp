@@ -86,7 +86,29 @@ std::vector<StreamChunk> ParseStreamsResponse(const std::string &json) {
 			} catch (const std::exception &) {
 				continue; // skip an unparseable timestamp rather than fail the whole scan
 			}
-			chunk.values.emplace_back(ns, line_str ? std::string(line_str) : std::string());
+			StreamEntry entry;
+			entry.ts_ns = ns;
+			entry.line = line_str ? std::string(line_str) : std::string();
+			// With the `categorize-labels` response flag (which loki_scan always requests), the
+			// optional 3rd element is an object like {"structuredMetadata": {...}, "parsed": {...}}.
+			// Extract structuredMetadata; entries without any get an empty {} here. (Without the
+			// flag Loki folds structured metadata into the stream labels instead, and this is
+			// simply absent — the map stays empty.) `parsed` pipeline labels are not surfaced yet.
+			yyjson_val *categorized = yyjson_arr_get(pair, 2);
+			yyjson_val *sm = yyjson_obj_get(categorized, "structuredMetadata");
+			if (sm) {
+				yyjson_obj_iter sm_iter;
+				yyjson_obj_iter_init(sm, &sm_iter);
+				yyjson_val *sm_key;
+				while ((sm_key = yyjson_obj_iter_next(&sm_iter))) {
+					const char *k = yyjson_get_str(sm_key);
+					const char *v = yyjson_get_str(yyjson_obj_iter_get_val(sm_key));
+					if (k && v) {
+						entry.structured_metadata.emplace(k, v);
+					}
+				}
+			}
+			chunk.values.push_back(std::move(entry));
 		}
 
 		chunks.push_back(std::move(chunk));

@@ -7,6 +7,7 @@
 
 using duckdb::loki::LokiRow;
 using duckdb::loki::StreamChunk;
+using duckdb::loki::StreamEntry;
 using duckdb::loki::StreamPager;
 
 namespace {
@@ -15,7 +16,12 @@ namespace {
 StreamChunk MakeChunk(const std::vector<std::pair<int64_t, std::string>> &entries) {
 	StreamChunk chunk;
 	chunk.labels = {{"job", "x"}};
-	chunk.values = entries;
+	for (const auto &e : entries) {
+		StreamEntry entry;
+		entry.ts_ns = e.first;
+		entry.line = e.second;
+		chunk.values.push_back(std::move(entry));
+	}
 	return chunk;
 }
 
@@ -94,6 +100,23 @@ TEST_CASE("limit is hit exactly across a page boundary") {
 	CHECK(pager.Done());
 	CHECK_EQ(p2.size(), size_t(1)); // one new row -> 3 total, exactly the limit
 	CHECK_EQ(p2[0].line, std::string("a"));
+}
+
+TEST_CASE("structured metadata survives paging") {
+	StreamChunk chunk;
+	chunk.labels = {{"job", "x"}};
+	StreamEntry entry;
+	entry.ts_ns = 100;
+	entry.line = "b";
+	entry.structured_metadata = {{"trace_id", "abc"}};
+	chunk.values.push_back(std::move(entry));
+
+	StreamPager pager("{job=\"x\"}", 0, 1000, "backward", 100, 5000);
+	pager.NextRequest();
+	auto rows = pager.Accept({chunk});
+	CHECK_EQ(rows.size(), size_t(1));
+	CHECK_EQ(rows[0].structured_metadata.size(), size_t(1));
+	CHECK_EQ(rows[0].structured_metadata.at("trace_id"), std::string("abc"));
 }
 
 TEST_CASE("forward paging advances start upward") {

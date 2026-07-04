@@ -9,6 +9,7 @@
 #include "loki/time_bounds.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/common/constants.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/interval.hpp"
@@ -36,6 +37,7 @@ struct LokiScanBindData : public TableFunctionData {
 	int64_t limit = DEFAULT_LIMIT;
 	std::string direction = "backward";
 	loki::AuthConfig auth;
+	std::vector<std::string> label_columns; // labels promoted to top-level columns, in declared order
 };
 
 struct LokiScanGlobalState : public GlobalTableFunctionState {
@@ -49,6 +51,7 @@ struct LokiScanGlobalState : public GlobalTableFunctionState {
 	loki::StreamPager pager;
 	std::vector<loki::LokiRow> buffer;
 	idx_t buf_offset = 0;
+	std::vector<column_t> column_ids; // projected bind-schema columns to emit, in output order
 
 	idx_t MaxThreads() const override {
 		return 1;
@@ -207,12 +210,32 @@ unique_ptr<FunctionData> LokiScanBind(ClientContext &context, TableFunctionBindI
 		result->end_ns = ResolveTimeBound(*p, now_ns);
 	}
 
+	// `labels := ['job','level']` promotes each named label to a top-level VARCHAR column so
+	// its values are directly selectable (and, from v0.4, pushable). Unlisted labels still
+	// appear inside the `labels` MAP. See DESIGN.md §3.2 / §4.2.
+	if (auto *p = FindParam(input, "labels")) {
+		for (const auto &child : ListValue::GetChildren(*p)) {
+			if (child.IsNull()) {
+				throw BinderException("loki_scan 'labels' must not contain NULL entries");
+			}
+			result->label_columns.push_back(child.ToString());
+		}
+	}
+
+	// Output schema (DESIGN.md §3.2): timestamp, line, one column per promoted label,
+	// then the full labels MAP and per-entry structured_metadata MAP.
 	return_types.push_back(LogicalType::TIMESTAMP_NS);
 	names.emplace_back("timestamp");
 	return_types.push_back(LogicalType::VARCHAR);
 	names.emplace_back("line");
+	for (const auto &label : result->label_columns) {
+		return_types.push_back(LogicalType::VARCHAR);
+		names.push_back(label);
+	}
 	return_types.push_back(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
 	names.emplace_back("labels");
+	return_types.push_back(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
+	names.emplace_back("structured_metadata");
 
 	return std::move(result);
 }
@@ -221,20 +244,40 @@ unique_ptr<GlobalTableFunctionState> LokiScanInitGlobal(ClientContext &context, 
 	auto &bind_data = input.bind_data->Cast<LokiScanBindData>();
 
 	auto headers = loki::BuildAuthHeaders(bind_data.auth);
+	// Request categorized labels so structured metadata comes back per-entry (separated from the
+	// indexed stream labels) instead of being folded into the stream label set. Servers that do
+	// not support the flag ignore it and simply return no structured metadata (DESIGN.md §5).
+	headers.emplace_back("X-Loki-Response-Encoding-Flags", "categorize-labels");
 	loki::StreamPager pager(bind_data.query, bind_data.start_ns, bind_data.end_ns, bind_data.direction,
 	                        bind_data.limit);
 
 	// No network here: the first page is fetched lazily on the first output call so that
 	// binding/DESCRIBE stay cheap and offline.
-	return make_uniq<LokiScanGlobalState>(bind_data.endpoint, std::move(headers), std::move(pager));
+	auto state = make_uniq<LokiScanGlobalState>(bind_data.endpoint, std::move(headers), std::move(pager));
+	// Projection pushdown (DESIGN.md §6.3): column_ids holds the bind-schema indices to emit,
+	// in output order, so we only build the requested columns (skipping the expensive MAPs).
+	state->column_ids = input.column_ids;
+	return std::move(state);
+}
+
+// Build a MAP(VARCHAR, VARCHAR) Value from a string map (labels or structured metadata).
+Value MapFromStrings(const std::map<std::string, std::string> &m) {
+	InsertionOrderPreservingMap<string> ordered;
+	for (const auto &kv : m) {
+		ordered.insert(kv.first, kv.second);
+	}
+	return Value::MAP(ordered);
 }
 
 void LokiScanFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &state = data_p.global_state->Cast<LokiScanGlobalState>();
+	auto &bind_data = data_p.bind_data->Cast<LokiScanBindData>();
 
-	// TIMESTAMP_NS is stored as raw nanoseconds (do NOT use Timestamp::FromEpochNanoSeconds,
-	// which rescales to microseconds for the µs TIMESTAMP type).
-	auto timestamps = FlatVector::GetData<int64_t>(output.data[0]);
+	// Source-column index meaning: 0=timestamp, 1=line, [2, 2+N)=promoted label column,
+	// 2+N=labels MAP, 3+N=structured_metadata MAP (N = number of promoted labels).
+	const idx_t num_labels = bind_data.label_columns.size();
+	const column_t labels_map_col = 2 + num_labels;
+	const column_t smeta_map_col = 3 + num_labels;
 
 	idx_t count = 0;
 	while (count < STANDARD_VECTOR_SIZE) {
@@ -263,14 +306,31 @@ void LokiScanFunction(ClientContext &context, TableFunctionInput &data_p, DataCh
 		}
 
 		const auto &row = state.buffer[state.buf_offset];
-		timestamps[count] = row.ts_ns;
-		output.data[1].SetValue(count, Value(row.line));
-
-		InsertionOrderPreservingMap<string> label_map;
-		for (const auto &label : row.labels) {
-			label_map.insert(label.first, label.second);
+		// Projection pushdown: emit only the requested columns, in output order. output.data[out]
+		// corresponds to source column state.column_ids[out]. Unrequested MAP columns are skipped.
+		for (idx_t out = 0; out < state.column_ids.size(); out++) {
+			const column_t src = state.column_ids[out];
+			if (src == COLUMN_IDENTIFIER_ROW_ID || IsVirtualColumn(src)) {
+				continue; // we emit no row-ids or virtual columns
+			}
+			auto &vec = output.data[out];
+			if (src == 0) {
+				// TIMESTAMP_NS is stored as raw nanoseconds (do NOT use Timestamp::FromEpochNanoSeconds,
+				// which rescales to microseconds for the µs TIMESTAMP type).
+				FlatVector::GetData<int64_t>(vec)[count] = row.ts_ns;
+			} else if (src == 1) {
+				vec.SetValue(count, Value(row.line));
+			} else if (src < labels_map_col) {
+				// A promoted label column: its value, or NULL where the stream lacks the label.
+				const auto &name = bind_data.label_columns[src - 2];
+				auto it = row.labels.find(name);
+				vec.SetValue(count, it != row.labels.end() ? Value(it->second) : Value(LogicalType::VARCHAR));
+			} else if (src == labels_map_col) {
+				vec.SetValue(count, MapFromStrings(row.labels));
+			} else { // smeta_map_col
+				vec.SetValue(count, MapFromStrings(row.structured_metadata));
+			}
 		}
-		output.data[2].SetValue(count, Value::MAP(label_map));
 
 		state.buf_offset++;
 		count++;
@@ -296,6 +356,11 @@ void RegisterLokiScanFunction(ExtensionLoader &loader) {
 	loki_scan.named_parameters["end"] = LogicalType::ANY;
 	loki_scan.named_parameters["limit"] = LogicalType::BIGINT;
 	loki_scan.named_parameters["direction"] = LogicalType::VARCHAR;
+	// labels := ['job','level'] promotes labels to top-level VARCHAR columns (DESIGN.md §3.2).
+	loki_scan.named_parameters["labels"] = LogicalType::LIST(LogicalType::VARCHAR);
+	// Projection pushdown (DESIGN.md §6.3): only build the columns the query selects. We do NOT
+	// set filter_pushdown/filter_prune — those are v0.4.
+	loki_scan.projection_pushdown = true;
 	loader.RegisterFunction(loki_scan);
 }
 

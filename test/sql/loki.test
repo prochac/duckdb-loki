@@ -28,8 +28,8 @@ SELECT count(*) >= 1 FROM duckdb_functions() WHERE function_name = 'loki_scan';
 ----
 true
 
-# It exposes the fixed v0.1 output schema (timestamp, line, labels). Binding does not touch
-# the network, so this is safe without a live Loki.
+# It exposes the base output schema (timestamp, line, labels, structured_metadata). Binding
+# does not touch the network, so this is safe without a live Loki.
 query II
 SELECT column_name, column_type
 FROM (DESCRIBE SELECT * FROM loki_scan('{job="x"}', endpoint := 'http://localhost:3100'));
@@ -37,6 +37,20 @@ FROM (DESCRIBE SELECT * FROM loki_scan('{job="x"}', endpoint := 'http://localhos
 timestamp	TIMESTAMP_NS
 line	VARCHAR
 labels	MAP(VARCHAR, VARCHAR)
+structured_metadata	MAP(VARCHAR, VARCHAR)
+
+# v0.3: `labels := [...]` promotes each named label to a top-level VARCHAR column, inserted
+# between `line` and the `labels` MAP, in declared order (DESIGN.md §3.2).
+query II
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM loki_scan('{job="x"}', endpoint := 'http://localhost:3100', labels := ['job', 'pod']));
+----
+timestamp	TIMESTAMP_NS
+line	VARCHAR
+job	VARCHAR
+pod	VARCHAR
+labels	MAP(VARCHAR, VARCHAR)
+structured_metadata	MAP(VARCHAR, VARCHAR)
 
 # With no endpoint and no secret, binding fails with a clear message (v0.2).
 statement error
@@ -66,7 +80,7 @@ must be 'backward' or 'forward'
 query I
 SELECT count(*) FROM (DESCRIBE SELECT * FROM loki_scan('{job="x"}', endpoint := 'http://localhost:3100', start := -INTERVAL 2 HOUR));
 ----
-3
+4
 
 # Month/year intervals are calendar-dependent and rejected with a helpful message.
 statement error
@@ -93,6 +107,7 @@ FROM (DESCRIBE SELECT * FROM loki_scan('{job="x"}', secret := 'my_loki'));
 timestamp	TIMESTAMP_NS
 line	VARCHAR
 labels	MAP(VARCHAR, VARCHAR)
+structured_metadata	MAP(VARCHAR, VARCHAR)
 
 # Referencing a secret that does not exist errors clearly.
 statement error
@@ -107,4 +122,4 @@ CREATE SECRET loki (TYPE loki, ENDPOINT 'http://localhost:3100');
 query I
 SELECT count(*) FROM (DESCRIBE SELECT * FROM loki_scan('{job="x"}'));
 ----
-3
+4

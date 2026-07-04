@@ -51,7 +51,7 @@ std::vector<LokiRow> StreamPager::Accept(const std::vector<StreamChunk> &page) {
 
 	for (const auto &chunk : page) {
 		for (const auto &entry : chunk.values) {
-			const int64_t ts = entry.first;
+			const int64_t ts = entry.ts_ns;
 			page_count++;
 
 			if (!have_extreme) {
@@ -66,14 +66,15 @@ std::vector<LokiRow> StreamPager::Accept(const std::vector<StreamChunk> &page) {
 			if (emitted_ >= user_limit_) {
 				continue; // still count the raw entry (for short-page detection), but don't emit
 			}
-			std::string key = EntryKey(ts, entry.second, chunk.labels);
+			std::string key = EntryKey(ts, entry.line, chunk.labels);
 			if (boundary_keys_.count(key)) {
 				continue; // already emitted at the previous boundary
 			}
 			LokiRow row;
 			row.ts_ns = ts;
-			row.line = entry.second;
+			row.line = entry.line;
 			row.labels = chunk.labels;
+			row.structured_metadata = entry.structured_metadata;
 			rows.push_back(std::move(row));
 			emitted_++;
 		}
@@ -98,8 +99,8 @@ std::vector<LokiRow> StreamPager::Accept(const std::vector<StreamChunk> &page) {
 	boundary_keys_.clear();
 	for (const auto &chunk : page) {
 		for (const auto &entry : chunk.values) {
-			if (entry.first == extreme_ns) {
-				boundary_keys_.insert(EntryKey(entry.first, entry.second, chunk.labels));
+			if (entry.ts_ns == extreme_ns) {
+				boundary_keys_.insert(EntryKey(entry.ts_ns, entry.line, chunk.labels));
 			}
 		}
 	}

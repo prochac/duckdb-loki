@@ -9,11 +9,19 @@
 namespace duckdb {
 namespace loki {
 
-// One Loki stream: its label set plus the (nanosecond-epoch, line) entries it carries.
+// One entry within a stream: its nanosecond-epoch timestamp, line, and optional per-entry
+// structured metadata (the newer Loki feature — the optional 3rd element of a `values` pair).
+struct StreamEntry {
+	int64_t ts_ns;
+	std::string line;
+	std::map<std::string, std::string> structured_metadata; // usually empty
+};
+
+// One Loki stream: its label set plus the entries it carries.
 // This mirrors a single element of the `data.result[]` array in a "streams" response.
 struct StreamChunk {
 	std::map<std::string, std::string> labels;
-	std::vector<std::pair<int64_t, std::string>> values; // (timestamp_ns, line)
+	std::vector<StreamEntry> values;
 };
 
 // One flattened output row: a single stream entry paired with its stream's labels.
@@ -22,6 +30,7 @@ struct LokiRow {
 	int64_t ts_ns;
 	std::string line;
 	std::map<std::string, std::string> labels;
+	std::map<std::string, std::string> structured_metadata;
 };
 
 // A fully-built request to Loki's query_range endpoint: a path and ordered, unencoded

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -8,9 +9,9 @@ namespace duckdb {
 namespace loki {
 
 struct HttpResponse {
-	long status = 0;      // HTTP status code; 0 if the request never completed
-	std::string body;     // response body (on success or error status)
-	std::string error;    // transport-level error message; empty if the request completed
+	int64_t status = 0; // HTTP status code; 0 if the request never completed
+	std::string body;   // response body (on success or error status)
+	std::string error;  // transport-level error message; empty if the request completed
 };
 
 // Issue an HTTP(S) GET. `endpoint` is scheme://host[:port] (TLS is used for https://).

@@ -43,8 +43,11 @@ jobs:
         with:
           vcpkgGitCommitId: 84bab45d415d22042bd0b9081aea57f362da3f35
 
+      # The runner's shallow submodule checkout has no tags, so DuckDB's `git describe`
+      # fails and the loadable artifact would be stamped with the dummy version v0.0.1,
+      # which a stock v1.5.4 CLI then refuses to LOAD. Pin the version explicitly.
       - name: Build extension
-        run: make
+        run: OVERRIDE_GIT_DESCRIBE=${DUCKDB_VERSION} make
 
       - name: Run mock sqllogictest
         run: ./test/mock/run.sh

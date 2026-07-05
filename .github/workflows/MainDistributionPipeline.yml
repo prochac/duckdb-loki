@@ -19,7 +19,15 @@ jobs:
       duckdb_version: v1.5.4
       ci_tools_version: v1.5-variegata
       extension_name: loki
+      # cpp-httplib + OpenSSL do live HTTP(S) at scan time, which the WebAssembly
+      # targets cannot do. Skip them so the pipeline stays green (mirrors
+      # description.yml's excluded_platforms).
+      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads'
 
+  # Only the format check runs via the reusable workflow: it just runs clang-format/black
+  # over the sources and needs no build. The tidy check does configure CMake (to emit
+  # compile_commands.json), which requires our vcpkg dependencies (openssl/yyjson/httplib)
+  # — and the reusable workflow has no way to set up vcpkg. So tidy runs as its own job below.
   code-quality-check:
     name: Code Quality Check
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5-variegata
@@ -27,4 +35,38 @@ jobs:
       duckdb_version: v1.5.4
       ci_tools_version: v1.5-variegata
       extension_name: loki
-      format_checks: 'format;tidy'
+      format_checks: 'format'
+
+  tidy-check:
+    name: Tidy Check
+    runs-on: ubuntu-24.04
+    env:
+      CC: gcc
+      CXX: g++
+      GEN: ninja
+      TIDY_THREADS: 4
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      VCPKG_TARGET_TRIPLET: x64-linux
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: actions/checkout@v4
+        name: Checkout Extension CI tools
+        with:
+          path: extension-ci-tools
+          ref: v1.5-variegata
+          repository: duckdb/extension-ci-tools
+
+      - name: Install
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build clang-tidy && sudo pip3 install pybind11[global] --break-system-packages
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11.5
+        with:
+          vcpkgGitCommitId: 84bab45d415d22042bd0b9081aea57f362da3f35
+
+      - name: Tidy Check
+        run: make tidy-check

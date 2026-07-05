@@ -1,8 +1,9 @@
 # name: test/sql/loki_mock.test
 # description: End-to-end SQL against a mock Loki HTTP server (DESIGN.md §8) — streams parsing,
+# group: [sql]
+
 #              projection / label promotion, error surfacing, discovery, and (the point of the
 #              file) filter-pushdown *translation* asserted via the mock's request-echo mode.
-# group: [sql]
 #
 # This test needs the mock server running and its base URL in ${LOKI_MOCK_URL}; test/mock/run.sh
 # starts it and sets that. Under a plain `make test` the env var is unset, so require-env skips

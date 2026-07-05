@@ -47,30 +47,38 @@ def streams_body(result):
 # 19 digits of nanosecond precision so the test can assert the extension preserves raw ns
 # (not silently rescaled to microseconds). Structured metadata is present, empty, and
 # multi-key across the three entries.
-STREAM_FIXTURE = streams_body([
-    {
-        "stream": {"job": "api", "level": "error", "pod": "api-1"},
-        "values": [
-            ["1700000000000000001", "boom one", {"structuredMetadata": {"trace_id": "t-aaa"}, "parsed": {}}],
-            ["1700000000000000002", "boom two", {"structuredMetadata": {}, "parsed": {}}],
-        ],
-    },
-    {
-        "stream": {"job": "api", "level": "info", "pod": "api-2"},
-        "values": [
-            ["1700000000000000003", "hello world",
-             {"structuredMetadata": {"trace_id": "t-bbb", "span_id": "s-1"}, "parsed": {}}],
-        ],
-    },
-])
+STREAM_FIXTURE = streams_body(
+    [
+        {
+            "stream": {"job": "api", "level": "error", "pod": "api-1"},
+            "values": [
+                ["1700000000000000001", "boom one", {"structuredMetadata": {"trace_id": "t-aaa"}, "parsed": {}}],
+                ["1700000000000000002", "boom two", {"structuredMetadata": {}, "parsed": {}}],
+            ],
+        },
+        {
+            "stream": {"job": "api", "level": "info", "pod": "api-2"},
+            "values": [
+                [
+                    "1700000000000000003",
+                    "hello world",
+                    {"structuredMetadata": {"trace_id": "t-bbb", "span_id": "s-1"}, "parsed": {}},
+                ],
+            ],
+        },
+    ]
+)
 
 # Discovery fixtures.
 LABELS_FIXTURE = {"status": "success", "data": ["job", "level", "pod"]}
 LABEL_VALUES_FIXTURE = {"status": "success", "data": ["api", "web"]}
-SERIES_FIXTURE = {"status": "success", "data": [
-    {"job": "api", "level": "error"},
-    {"job": "api", "level": "info"},
-]}
+SERIES_FIXTURE = {
+    "status": "success",
+    "data": [
+        {"job": "api", "level": "error"},
+        {"job": "api", "level": "info"},
+    ],
+}
 
 
 def echo_body(params, auth, tenant):
@@ -90,12 +98,14 @@ def echo_body(params, auth, tenant):
         "req_auth": auth,
         "req_tenant": tenant,
     }
-    return streams_body([
-        {
-            "stream": {"job": "echo", "level": "info", "pod": "p1"},
-            "values": [[ts, query, {"structuredMetadata": meta, "parsed": {}}]],
-        },
-    ])
+    return streams_body(
+        [
+            {
+                "stream": {"job": "echo", "level": "info", "pod": "p1"},
+                "values": [[ts, query, {"structuredMetadata": meta, "parsed": {}}]],
+            },
+        ]
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -132,11 +142,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == API + "/query_range":
             query = params.get("query", [""])[0]
             if "__echo__" in query:
-                self._send_json(200, echo_body(params, self._auth(),
-                                               self.headers.get("X-Scope-OrgID", "")))
+                self._send_json(200, echo_body(params, self._auth(), self.headers.get("X-Scope-OrgID", "")))
             elif "__error__" in query:
-                self._send_json(400, {"status": "error",
-                                      "error": "mock injected error: parse error at line 1"})
+                self._send_json(400, {"status": "error", "error": "mock injected error: parse error at line 1"})
             elif "__empty__" in query:
                 self._send_json(200, streams_body([]))
             else:

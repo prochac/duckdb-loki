@@ -222,6 +222,22 @@ FROM loki(selector := '{job="__echo__"}', secret := 'env_override');
 ----
 11
 
+# An unnamed CREATE SECRET (TYPE loki, ...) is DuckDB's default `loki` secret (named
+# `__default_loki`). With no `secret :=`, loki() resolves it via LookupSecret and its auth
+# reaches the wire — no need to name the secret or repeat the connection inline.
+statement ok
+CREATE SECRET (TYPE loki, ENDPOINT '${LOKI_MOCK_URL}', TOKEN 'glc_secret', TENANT '55');
+
+query II
+SELECT structured_metadata['req_auth'], structured_metadata['req_tenant']
+FROM loki(selector := '{job="__echo__"}');
+----
+bearer	55
+
+# Drop the default secret so it does not leak into the connection of later secret-less calls.
+statement ok
+DROP SECRET __default_loki;
+
 # ============================================================================================
 # Discovery helpers (DESIGN.md §3.4) return actual rows, not just a bind-time schema.
 # ============================================================================================

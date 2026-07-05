@@ -98,9 +98,11 @@ void ResolveLokiConnection(ClientContext &context, TableFunctionBindInput &input
 			throw BinderException("%s: no secret named '%s' found", fn, name);
 		}
 		ReadLokiSecret(dynamic_cast<const KeyValueSecret &>(*entry->secret), endpoint, auth, secret_headers);
-	} else if (auto entry = secret_manager.GetSecretByName(transaction, "loki")) {
-		// No explicit secret: fall back to a default secret named "loki" if one exists.
-		ReadLokiSecret(dynamic_cast<const KeyValueSecret &>(*entry->secret), endpoint, auth, secret_headers);
+	} else if (auto match = secret_manager.LookupSecret(transaction, "", "loki"); match.HasMatch()) {
+		// No explicit secret: fall back to the best-matching `loki` secret. DuckDB names an
+		// unnamed CREATE SECRET (TYPE loki, ...) `__default_loki`, and empty-scope secrets match
+		// any path at the lowest score, tie-breaking toward the default (leading underscore sorts first).
+		ReadLokiSecret(dynamic_cast<const KeyValueSecret &>(match.GetSecret()), endpoint, auth, secret_headers);
 	}
 
 	// Inline overrides take precedence over the secret.
@@ -128,8 +130,8 @@ void ResolveLokiConnection(ClientContext &context, TableFunctionBindInput &input
 
 	if (endpoint.empty()) {
 		throw BinderException("%s requires an endpoint: pass endpoint := 'http://localhost:3100' or "
-		                      "reference a secret (secret := 'my_loki', or a default secret named 'loki') "
-		                      "created with CREATE SECRET (TYPE loki, ENDPOINT ...)",
+		                      "reference a secret (secret := 'my_loki', or a default secret created with "
+		                      "CREATE SECRET (TYPE loki, ENDPOINT ...))",
 		                      fn);
 	}
 	while (!endpoint.empty() && endpoint.back() == '/') {

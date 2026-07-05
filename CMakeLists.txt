@@ -61,6 +61,19 @@ else()
   target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${HTTPLIB_INCLUDE_DIR})
 endif()
 
+# On glibc, cpp-httplib's asynchronous name resolution pulls in getaddrinfo_a/gai_* which
+# live in libanl. Older glibc (e.g. the manylinux images the release build runs on) keeps
+# them in a separate libanl.so that must be linked explicitly, or the link fails with
+# "undefined reference to getaddrinfo_a". Newer glibc folds them into libc and ships libanl
+# as a stub, so linking it there is harmless. Skip on non-Linux / musl where it is absent.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  find_library(ANL_LIBRARY anl)
+  if(ANL_LIBRARY)
+    target_link_libraries(${EXTENSION_NAME} ${ANL_LIBRARY})
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ANL_LIBRARY})
+  endif()
+endif()
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"

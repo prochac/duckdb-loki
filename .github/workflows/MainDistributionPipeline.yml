@@ -68,5 +68,8 @@ jobs:
         with:
           vcpkgGitCommitId: 84bab45d415d22042bd0b9081aea57f362da3f35
 
+      # The stock tidy-check target omits VCPKG_MANIFEST_FLAGS (unlike the release target), so
+      # vcpkg never installs our deps and find_package(yyjson) fails at configure. Inject the
+      # manifest dir via EXT_FLAGS (a documented passthrough into the tidy configure's flags).
       - name: Tidy Check
-        run: make tidy-check
+        run: make tidy-check EXT_FLAGS="-DVCPKG_MANIFEST_DIR=${{ github.workspace }}"

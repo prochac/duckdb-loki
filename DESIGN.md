@@ -85,6 +85,18 @@ Every table function resolves a secret by name (`secret := 'my_loki'`) or falls 
 the default `loki` secret. Individual connection fields may also be overridden inline for
 ad-hoc use.
 
+For CI/container use, the `env` provider seeds the secret from the standard `logcli`
+environment variables (the Loki analog of libpq's `PG*`) — `LOKI_ADDR` → endpoint,
+`LOKI_BEARER_TOKEN` → token, `LOKI_USERNAME`/`LOKI_PASSWORD` → basic auth, `LOKI_ORG_ID` →
+tenant:
+
+```sql
+CREATE SECRET loki (TYPE loki, PROVIDER env);   -- reads LOKI_* from the environment
+```
+
+Inline `CREATE SECRET` options override the environment-seeded values; per-call params
+still override the secret.
+
 ### 3.2 Primary table function — `loki(...)` (pushdown-driven)
 
 ```sql

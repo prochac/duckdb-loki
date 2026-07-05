@@ -40,6 +40,13 @@ done
 
 export LOKI_MOCK_URL="http://127.0.0.1:$PORT"
 
+# Seed the standard logcli env vars so the test can exercise the `env` secret provider
+# (CREATE SECRET (TYPE loki, PROVIDER env)) end-to-end: LOKI_ADDR -> endpoint,
+# LOKI_BEARER_TOKEN -> token, LOKI_ORG_ID -> tenant. The mock echoes auth/tenant back.
+export LOKI_ADDR="$LOKI_MOCK_URL"
+export LOKI_BEARER_TOKEN="glc_from_env"
+export LOKI_ORG_ID="99"
+
 echo "==> Waiting for mock Loki to be ready at $LOKI_MOCK_URL"
 ready=
 for _ in $(seq 1 50); do

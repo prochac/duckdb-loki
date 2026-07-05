@@ -200,6 +200,28 @@ FROM loki(selector := '{job="__echo__"}', secret := 'mock_auth');
 ----
 bearer	77
 
+# The `env` provider seeds the secret from the standard logcli env vars (LOKI_ADDR ->
+# endpoint, LOKI_BEARER_TOKEN -> token, LOKI_ORG_ID -> tenant), which test/mock/run.sh sets.
+# No ENDPOINT/TOKEN given: the whole connection comes from the environment, and reaches the wire.
+statement ok
+CREATE SECRET env_auth (TYPE loki, PROVIDER env);
+
+query II
+SELECT structured_metadata['req_auth'], structured_metadata['req_tenant']
+FROM loki(selector := '{job="__echo__"}', secret := 'env_auth');
+----
+bearer	99
+
+# Inline CREATE SECRET options override the environment-seeded values.
+statement ok
+CREATE SECRET env_override (TYPE loki, PROVIDER env, TENANT '11');
+
+query I
+SELECT structured_metadata['req_tenant']
+FROM loki(selector := '{job="__echo__"}', secret := 'env_override');
+----
+11
+
 # ============================================================================================
 # Discovery helpers (DESIGN.md §3.4) return actual rows, not just a bind-time schema.
 # ============================================================================================

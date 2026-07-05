@@ -84,6 +84,25 @@ ORDER BY timestamp;
 
 A secret named `loki` is used automatically when `secret :=` is omitted.
 
+**From the environment.** For CI and containers where you'd rather not hard-code credentials,
+the `env` provider seeds the secret from the standard [`logcli`](https://grafana.com/docs/loki/latest/query/logcli/)
+variables — the Loki analog of libpq's `PG*`:
+
+```sql
+CREATE SECRET loki (TYPE loki, PROVIDER env);   -- reads LOKI_* from the environment
+```
+
+| env var                           | maps to                    |
+|-----------------------------------|----------------------------|
+| `LOKI_ADDR`                       | `endpoint`                 |
+| `LOKI_BEARER_TOKEN`               | `token`                    |
+| `LOKI_USERNAME` / `LOKI_PASSWORD` | basic auth                 |
+| `LOKI_ORG_ID`                     | `tenant` → `X-Scope-OrgID` |
+
+Inline options override the environment — e.g. `CREATE SECRET (TYPE loki, PROVIDER env, TENANT '5')`
+takes `endpoint`/`token` from `LOKI_*` but pins the tenant to `5` regardless of `LOKI_ORG_ID`.
+Per-call params in turn override the secret. Name it `loki` (as above) to make it the default.
+
 > **Caveats (v0.2):**
 > - `end` and `limit` are SQL reserved words, so they must be **double-quoted** when used as
 >   named parameters: `"end" := now()`, `"limit" := 1000`. (`start` needs no quoting.)

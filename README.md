@@ -5,13 +5,13 @@ with label/time/line-filter pushdown into LogQL, so you can join your logs again
 
 This repository is based on https://github.com/duckdb/extension-template.
 
-> **Status:** early development (roadmap **v0.5**). Working end-to-end: the raw-LogQL
+> **Status:** preparing the **v1.0** publish. Working end-to-end: the raw-LogQL
 > `loki_scan()` function, the pushdown-driven `loki()` function (label/time/line-filter
 > pushdown into LogQL), promoted **label columns**, **projection pushdown**,
 > **structured metadata**, the `loki_labels` / `loki_label_values` / `loki_series` discovery
-> helpers, **secrets-based auth**, and **automatic paging** over Loki's per-request cap. Still
-> to come: cross-platform publishing (v1.0) and `ATTACH` (v1.1). See [`DESIGN.md`](./DESIGN.md)
-> for the full specification and roadmap.
+> helpers, **secrets-based auth**, and **automatic paging** over Loki's per-request cap.
+> Targets DuckDB **v1.5.4**. Still to come: the community-extensions submission (v1.0) and
+> `ATTACH` (v1.1). See [`DESIGN.md`](./DESIGN.md) for the full specification and roadmap.
 
 ## Usage
 
@@ -223,6 +223,16 @@ selector/label/time/line-filter pushdown returns exactly them. It needs `docker`
 ```
 See [`test/integration/README.md`](test/integration/README.md) for details. It also runs in CI
 on demand via the **Integration (Docker Loki)** workflow.
+
+### Installing from community-extensions
+
+Once the [community-extensions](https://github.com/duckdb/community-extensions) submission is
+accepted, the canonical install is a signed one-liner (no `-unsigned` needed):
+
+```sql
+INSTALL loki FROM community;
+LOAD loki;
+```
 
 ### Installing the deployed binaries
 To install extension binaries from a custom repository, launch DuckDB with

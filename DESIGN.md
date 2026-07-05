@@ -57,7 +57,8 @@ and cross-platform CI.
 
 - Metric queries via `loki_metric_query(...)` returning `(timestamp, value, labels)`.
 - Parallel reads sharded across sub-time-ranges (`max_threads > 1`).
-- Bind-time **automatic label-column discovery** via `/labels`.
+- Bind-time **automatic label-column discovery** via `/labels`, exposed as an explicit
+  opt-in (`labels := '*'`), never as the default for an absent `labels` (§4.2, §11.9).
 - `tail`/live streaming, `patterns`/detected-fields endpoints.
 
 ---
@@ -252,8 +253,17 @@ DuckDB pushes filters on **declared columns**, not on expressions like `labels['
 So to make `WHERE job = 'error'` pushable, `job` has to be a real output column. That's
 what the `labels := [...]` parameter is for: each named label becomes a `VARCHAR` column,
 and predicates on it are eligible for pushdown. Labels not listed still appear inside the
-`labels` MAP but are not individually pushable in v1. (Auto-discovering label columns at
-bind time via `/labels` is a stretch goal.)
+`labels` MAP but are not individually pushable in v1.
+
+**API-stability decision (frozen at v1.0 — see §11.9).** `labels := [...]` is a permanent,
+supported way to pin the promoted columns. When it is **absent**, `loki()` promotes **no**
+columns — the schema is exactly `timestamp, line, labels, structured_metadata`. This default
+is the published contract and must stay stable. Auto-discovery (calling `/labels` at bind
+time) is therefore a *stretch* goal shipped as an **explicit opt-in** — a sentinel value such
+as `labels := '*'` (or `labels := 'auto'`) — never the silent behavior of an absent `labels`.
+Making absent-`labels` auto-discover would change the default output schema for every existing
+`SELECT *`, and would tie that schema to live Loki state (non-reproducible, bind-time
+round-trip), so it is deliberately excluded from the default.
 
 ### 4.3 The mandatory-selector rule
 
@@ -472,6 +482,11 @@ Pin dependency versions in `vcpkg.json`. Keep the binary small — the C-API not
    hard-error with a message that names the fix, to avoid silently expensive full scans.)
 8. **Label-column staleness** — cache TTL for `/labels`, and how to refresh (re-`ATTACH`,
    a `PRAGMA`, or time-based)?
+9. **Auto label-column discovery — DECIDED (v1.0).** Keep `labels := [...]` as the permanent,
+   explicit way to promote label columns; an **absent** `labels` promotes **no** columns and
+   that default schema is the frozen published contract. Auto-discovery ships (if at all) as an
+   **opt-in sentinel** (`labels := '*'`), never by making absent-`labels` auto-discover — that
+   would break every existing `SELECT *` and tie the schema to live Loki state. See §4.2.
 
 ---
 

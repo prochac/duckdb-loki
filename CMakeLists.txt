@@ -9,11 +9,18 @@ set(TARGET_NAME loki)
 find_package(OpenSSL REQUIRED)
 find_package(yyjson CONFIG REQUIRED)
 
-# cpp-httplib is header-only. vcpkg (used by CI / community-extensions) ships a CMake config
-# exposing the httplib::httplib target; some system installs (e.g. Arch) ship only the header.
-# Support both: prefer the config target, otherwise just locate the header directory.
+# cpp-httplib is header-only. We use only its headers, deliberately NOT the vcpkg
+# httplib::httplib target: that target's INTERFACE exports CPPHTTPLIB_USE_NON_BLOCKING_GETADDRINFO
+# (plus brotli/openssl), and the async-DNS path it enables needs extra platform libraries
+# (glibc's libanl, macOS CoreFoundation/CFNetwork) and does not even compile under mingw
+# (GetAddrInfoExCancel is undeclared there). The default blocking resolver is all this
+# extension needs, so we take the include directory and drop the interface definitions.
+# vcpkg (CI / community-extensions) ships the config; some system installs (e.g. Arch) ship
+# only the header — support both.
 find_package(httplib CONFIG QUIET)
-if(NOT httplib_FOUND)
+if(httplib_FOUND)
+  get_target_property(HTTPLIB_INCLUDE_DIR httplib::httplib INTERFACE_INCLUDE_DIRECTORIES)
+else()
   find_path(HTTPLIB_INCLUDE_DIR httplib.h REQUIRED)
 endif()
 
@@ -52,27 +59,10 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto yyjson::yyjson)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto yyjson::yyjson)
 
-# cpp-httplib: link the config target when present (vcpkg), else add the located header dir.
-if(httplib_FOUND)
-  target_link_libraries(${EXTENSION_NAME} httplib::httplib)
-  target_link_libraries(${LOADABLE_EXTENSION_NAME} httplib::httplib)
-else()
-  target_include_directories(${EXTENSION_NAME} PRIVATE ${HTTPLIB_INCLUDE_DIR})
-  target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${HTTPLIB_INCLUDE_DIR})
-endif()
-
-# On glibc, cpp-httplib's asynchronous name resolution pulls in getaddrinfo_a/gai_* which
-# live in libanl. Older glibc (e.g. the manylinux images the release build runs on) keeps
-# them in a separate libanl.so that must be linked explicitly, or the link fails with
-# "undefined reference to getaddrinfo_a". Newer glibc folds them into libc and ships libanl
-# as a stub, so linking it there is harmless. Skip on non-Linux / musl where it is absent.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  find_library(ANL_LIBRARY anl)
-  if(ANL_LIBRARY)
-    target_link_libraries(${EXTENSION_NAME} ${ANL_LIBRARY})
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ANL_LIBRARY})
-  endif()
-endif()
+# cpp-httplib: add only its header directory (see the find_package note above for why we
+# intentionally avoid the httplib::httplib target and its interface compile definitions).
+target_include_directories(${EXTENSION_NAME} PRIVATE ${HTTPLIB_INCLUDE_DIR})
+target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE ${HTTPLIB_INCLUDE_DIR})
 
 install(
   TARGETS ${EXTENSION_NAME}

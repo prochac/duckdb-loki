@@ -1,0 +1,192 @@
+# name: test/sql/loki_attach.test
+# description: ATTACH ... (TYPE loki) — Loki as a read-only attached database (DESIGN.md §3.6).
+# group: [sql]
+#
+#              Exercises the catalog adapter end-to-end against the mock Loki server: the `logs`
+#              table reusing the pushdown scan core (WHERE → LogQL selector, asserted via the
+#              mock's request-echo mode), the mandatory-selector hard error on a bare scan,
+#              attach-by-URL and attach-by-secret, and per-tenant schemas.
+#
+# Needs the mock server and ${LOKI_MOCK_URL}; test/mock/run.sh starts it. Under a plain
+# `make test` the env var is unset, so require-env skips the whole file.
+
+require-env LOKI_MOCK_URL
+
+require loki
+
+# ============================================================================================
+# Attach inline by URL, promoting label columns so predicates on them are pushable.
+# ============================================================================================
+
+statement ok
+ATTACH '${LOKI_MOCK_URL}' AS lk (TYPE loki, labels ['job', 'level']);
+
+# The single fixed schema is `public`, holding one `logs` table.
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lk' AND schema_name = 'public' AND table_name = 'logs';
+----
+1
+
+# `WHERE job = 'v'` on a promoted label column is pushed THROUGH the catalog table into the
+# synthesized LogQL stream selector — the mock echoes the query back as `line`.
+query I
+SELECT line FROM lk.public.logs WHERE job = '__echo__';
+----
+{job="__echo__"}
+
+# Multiple label equalities refine the selector.
+query I
+SELECT line FROM lk.public.logs WHERE job = '__echo__' AND level = 'error';
+----
+{job="__echo__", level="error"}
+
+# A time bound (coarse push, residual applied) and a line filter coexist with the selector.
+query I
+SELECT line FROM lk.public.logs
+WHERE job = '__echo__' AND timestamp >= TIMESTAMP '2023-06-01 00:00:00' AND line LIKE '%timeout%';
+----
+{job="__echo__"} |= "timeout"
+
+# The streams fixture flows through the same scan core (three entries) — projection over the
+# catalog table works and the `job` equality is consumed into the selector.
+query I
+SELECT count(*) FROM lk.public.logs WHERE job = '__stream__';
+----
+3
+
+# Bare scan with no pushable selector MUST hard-error (DESIGN.md §4.3 / §11.7): Loki refuses a
+# query without a stream selector, so we reuse the mandatory-selector throw from the scan core.
+statement error
+SELECT * FROM lk.public.logs;
+----
+stream selector is required
+
+statement ok
+DETACH lk;
+
+# ============================================================================================
+# Attach by secret: the ATTACH target resolves a `loki` secret by name (path-as-name), and an
+# explicit SECRET option does the same.
+# ============================================================================================
+
+statement ok
+CREATE SECRET s_loki (TYPE loki, ENDPOINT '${LOKI_MOCK_URL}', TOKEN 'glc_secret', TENANT '42');
+
+statement ok
+ATTACH 's_loki' AS lk2 (TYPE loki, labels ['job']);
+
+# The secret's tenant reaches the wire as X-Scope-OrgID (echoed as req_tenant), and its bearer
+# token as the Authorization scheme (echoed as req_auth).
+query II
+SELECT structured_metadata['req_auth'], structured_metadata['req_tenant']
+FROM lk2.public.logs WHERE job = '__echo__';
+----
+bearer	42
+
+statement ok
+DETACH lk2;
+
+# Same, but the secret named via the explicit SECRET option while the path is ignored.
+statement ok
+ATTACH 'ignored_path' AS lk3 (TYPE loki, SECRET 's_loki', labels ['job']);
+
+query I
+SELECT line FROM lk3.public.logs WHERE job = '__echo__';
+----
+{job="__echo__"}
+
+statement ok
+DETACH lk3;
+
+# ============================================================================================
+# Multi-tenant: one schema per `tenants` entry, each carrying its own X-Scope-OrgID.
+# ============================================================================================
+
+statement ok
+ATTACH '${LOKI_MOCK_URL}' AS mt (TYPE loki, tenants ['1', '2'], labels ['job']);
+
+# Two tenant schemas exist (plus whatever system schemas duckdb_schemas lists for the db).
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'mt' AND schema_name IN ('1', '2');
+----
+2
+
+# Each schema's `logs` scan sends that tenant's id as X-Scope-OrgID.
+query I
+SELECT structured_metadata['req_tenant'] FROM mt."1".logs WHERE job = '__echo__';
+----
+1
+
+query I
+SELECT structured_metadata['req_tenant'] FROM mt."2".logs WHERE job = '__echo__';
+----
+2
+
+statement ok
+DETACH mt;
+
+# ============================================================================================
+# Label auto-discovery: with no `labels` option, promoted columns come from GET /labels at
+# attach time (the mock returns job, level, pod), so predicates on them are pushable.
+# ============================================================================================
+
+statement ok
+ATTACH '${LOKI_MOCK_URL}' AS ad (TYPE loki);
+
+# The auto-discovered label names became real columns on `logs` (timestamp, line, job, level,
+# pod, labels, structured_metadata).
+query I
+SELECT count(*) FROM (DESCRIBE ad.public.logs) WHERE column_name IN ('job', 'level', 'pod');
+----
+3
+
+# A discovered column is pushable into the selector.
+query I
+SELECT line FROM ad.public.logs WHERE pod = '__echo__';
+----
+{pod="__echo__"}
+
+# The optional `labels` catalog table enumerates label names via GET /labels.
+query I
+SELECT label FROM ad.public.labels ORDER BY label;
+----
+job
+level
+pod
+
+# The optional `series` table is selector-driven: a WHERE label predicate synthesizes match[]
+# and GET /series returns matching series (the mock's series fixture), exposed as label columns.
+query II
+SELECT job, level FROM ad.public.series WHERE job = 'api' ORDER BY level;
+----
+api	error
+api	info
+
+# The full label-set is also available as the `labels` MAP column.
+query I
+SELECT labels['level'] FROM ad.public.series WHERE job = 'api' ORDER BY level;
+----
+error
+info
+
+# A bare `series` scan with no pushable selector hard-errors, like `logs`.
+statement error
+SELECT * FROM ad.public.series;
+----
+stream selector is required
+
+statement ok
+DETACH ad;
+
+# An explicit empty `labels []` opts out of auto-discovery: no promoted columns, so a scan has
+# nothing to build a selector from and hard-errors (no /labels call is made).
+statement ok
+ATTACH '${LOKI_MOCK_URL}' AS noauto (TYPE loki, labels []);
+
+query I
+SELECT count(*) FROM (DESCRIBE noauto.public.logs) WHERE column_name NOT IN ('timestamp', 'line', 'labels', 'structured_metadata');
+----
+0
+
+statement ok
+DETACH noauto;

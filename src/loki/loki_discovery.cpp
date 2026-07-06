@@ -22,17 +22,6 @@ namespace duckdb {
 
 namespace {
 
-// Which discovery endpoint a call targets — decides both the request built at bind and how the
-// response is shaped into output rows.
-enum class DiscoveryKind { LABELS, LABEL_VALUES, SERIES };
-
-struct LokiDiscoveryBindData : public TableFunctionData {
-	DiscoveryKind kind;
-	std::string endpoint;
-	loki::AuthConfig auth;
-	loki::QueryRangeRequest request; // fully built at bind; no network until the scan runs
-};
-
 struct LokiDiscoveryGlobalState : public GlobalTableFunctionState {
 	LokiDiscoveryGlobalState(std::string endpoint_p, std::vector<std::pair<std::string, std::string>> headers_p,
 	                         loki::QueryRangeRequest request_p)
@@ -214,6 +203,12 @@ void AddDiscoveryNamedParameters(TableFunction &fn) {
 }
 
 } // namespace
+
+// Bind-less discovery scan for the ATTACH catalog's `labels` table (DESIGN.md §3.6): the entry
+// supplies a pre-built LokiDiscoveryBindData; DuckDB uses this function's execute + init only.
+TableFunction MakeLokiDiscoveryScanFunction() {
+	return TableFunction("loki_discovery", {}, LokiDiscoveryFunction, /*bind=*/nullptr, LokiDiscoveryInitGlobal);
+}
 
 void RegisterLokiDiscoveryFunctions(ExtensionLoader &loader) {
 	// loki_labels(...) — GET /labels, one row per label name (DESIGN.md §3.4).

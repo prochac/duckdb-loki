@@ -21,6 +21,16 @@ const Value *FindNamedParam(TableFunctionBindInput &input, const char *name);
 void ResolveLokiConnection(ClientContext &context, TableFunctionBindInput &input, std::string &endpoint,
                            loki::AuthConfig &auth, const char *fn);
 
+// Resolve the Loki connection at ATTACH time (DESIGN.md §3.6). `path` is the ATTACH target — an
+// `http(s)://` URL is treated as the endpoint, anything else as a secret name. `options` are the
+// lowercased `TYPE loki` attach options (secret / endpoint / token / username / password / tenant
+// / headers). Precedence mirrors ResolveLokiConnection: a secret first (explicit `secret`, else a
+// non-URL path as name, else the default `loki` secret), then inline overrides. Throws a
+// BinderException naming `fn` when no endpoint can be resolved. Trailing slashes are trimmed.
+void ResolveLokiConnectionFromOptions(ClientContext &context, const std::string &path,
+                                      const unordered_map<std::string, Value> &options, std::string &endpoint,
+                                      loki::AuthConfig &auth, const char *fn);
+
 // Resolve a start/end time bound to a nanosecond Unix epoch. An INTERVAL is an offset added to
 // `now_ns` (so `-INTERVAL 2 HOUR` means two hours ago); any timestamp-like value is an absolute
 // instant. Throws BinderException on a calendar-dependent (month/year) interval.

@@ -10,6 +10,8 @@
 
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
+#include "duckdb/parser/column_definition.hpp"
+#include "duckdb/parser/column_list.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -34,29 +36,6 @@ namespace duckdb {
 namespace {
 
 constexpr int64_t NANOS_PER_HOUR = 3600LL * 1000LL * 1000LL * 1000LL;
-constexpr int64_t DEFAULT_LIMIT = 5000;
-
-struct LokiScanBindData : public TableFunctionData {
-	std::string endpoint;
-	std::string query; // raw LogQL (loki_scan); for loki() it's built at init from the selector
-	int64_t start_ns = 0;
-	int64_t end_ns = 0;
-	int64_t limit = DEFAULT_LIMIT;
-	std::string direction = "backward";
-	loki::AuthConfig auth;
-	std::vector<std::string> label_columns; // labels promoted to top-level columns, in declared order
-
-	// --- Filter pushdown (loki(), DESIGN.md §4). Untouched by loki_scan (raw LogQL). ---
-	bool pushdown_mode = false; // true for loki(): assemble the query from selector + WHERE
-	std::string base_selector;  // mandatory base stream selector, refined by pushdown
-	std::vector<loki::LabelMatcher> pushed_matchers;
-	std::vector<loki::LineFilter> pushed_line_filters;
-	bool has_param_start = false; // start/end came from an explicit start:=/end:= argument
-	bool has_param_end = false;
-	// Time bounds gathered from WHERE (intersected across predicates); sentinels mean "none".
-	int64_t pushed_start_ns = std::numeric_limits<int64_t>::min();
-	int64_t pushed_end_ns = std::numeric_limits<int64_t>::max();
-};
 
 struct LokiScanGlobalState : public GlobalTableFunctionState {
 	LokiScanGlobalState(std::string endpoint_p, std::vector<std::pair<std::string, std::string>> headers_p,
@@ -584,6 +563,35 @@ void AddCommonNamedParameters(TableFunction &fn) {
 }
 
 } // namespace
+
+// Wire a TableFunction to the pushdown scan core (execute + pushdown_complex_filter + projection
+// pushdown) with NO bind — the ATTACH catalog's `logs` table supplies its own pre-built
+// LokiScanBindData through GetScanFunction, so DuckDB never calls a bind here. The callbacks stay
+// private to this translation unit; only this factory escapes.
+TableFunction MakeLokiPushdownTableFunction(table_function_t function, table_function_init_global_t init_global) {
+	TableFunction fn("loki", {}, function, /*bind=*/nullptr, init_global);
+	fn.pushdown_complex_filter = LokiPushdownComplexFilter;
+	fn.projection_pushdown = true;
+	return fn;
+}
+
+TableFunction MakeLokiCatalogScanFunction() {
+	return MakeLokiPushdownTableFunction(LokiScanFunction, LokiScanInitGlobal);
+}
+
+// Build the `logs` schema into a ColumnList, mirroring the return_types/names order in
+// LokiResolveCommon so the source-column index math in LokiScanFunction (0=ts, 1=line,
+// [2..2+N)=labels, 2+N=labels MAP, 3+N=structured_metadata MAP) is identical on the catalog path.
+void BuildLokiLogsColumns(const std::vector<std::string> &label_columns, ColumnList &columns) {
+	columns.AddColumn(ColumnDefinition("timestamp", LogicalType::TIMESTAMP_NS));
+	columns.AddColumn(ColumnDefinition("line", LogicalType::VARCHAR));
+	for (const auto &label : label_columns) {
+		columns.AddColumn(ColumnDefinition(label, LogicalType::VARCHAR));
+	}
+	columns.AddColumn(ColumnDefinition("labels", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)));
+	columns.AddColumn(
+	    ColumnDefinition("structured_metadata", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)));
+}
 
 void RegisterLokiScanFunction(ExtensionLoader &loader) {
 	// loki_scan(query, ...): raw LogQL, no predicate translation (DESIGN.md §3.3).

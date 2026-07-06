@@ -59,4 +59,10 @@ done
 [[ -n "$ready" ]] || { echo "mock server did not become ready at $LOKI_MOCK_URL" >&2; exit 1; }
 
 echo "==> Running mock sqllogictest"
-"$UNITTEST" --test-dir "$REPO_ROOT" test/sql/loki_mock.test
+# Optional args: one or more test files to run (default: the full mock suite). Lets the same
+# harness drive test/sql/loki_attach.test (ATTACH catalog, DESIGN.md §3.6) etc.
+if [[ $# -gt 0 ]]; then
+	"$UNITTEST" --test-dir "$REPO_ROOT" "$@"
+else
+	"$UNITTEST" --test-dir "$REPO_ROOT" test/sql/loki_mock.test
+fi

@@ -98,11 +98,14 @@ void ResolveLokiConnection(ClientContext &context, TableFunctionBindInput &input
 			throw BinderException("%s: no secret named '%s' found", fn, name);
 		}
 		ReadLokiSecret(dynamic_cast<const KeyValueSecret &>(*entry->secret), endpoint, auth, secret_headers);
-	} else if (auto match = secret_manager.LookupSecret(transaction, "", "loki"); match.HasMatch()) {
+	} else {
 		// No explicit secret: fall back to the best-matching `loki` secret. DuckDB names an
 		// unnamed CREATE SECRET (TYPE loki, ...) `__default_loki`, and empty-scope secrets match
 		// any path at the lowest score, tie-breaking toward the default (leading underscore sorts first).
-		ReadLokiSecret(dynamic_cast<const KeyValueSecret &>(match.GetSecret()), endpoint, auth, secret_headers);
+		auto match = secret_manager.LookupSecret(transaction, "", "loki");
+		if (match.HasMatch()) {
+			ReadLokiSecret(dynamic_cast<const KeyValueSecret &>(match.GetSecret()), endpoint, auth, secret_headers);
+		}
 	}
 
 	// Inline overrides take precedence over the secret.

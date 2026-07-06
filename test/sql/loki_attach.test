@@ -1,6 +1,7 @@
 # name: test/sql/loki_attach.test
 # description: ATTACH ... (TYPE loki) — Loki as a read-only attached database (DESIGN.md §3.6).
 # group: [sql]
+
 #
 #              Exercises the catalog adapter end-to-end against the mock Loki server: the `logs`
 #              table reusing the pushdown scan core (WHERE → LogQL selector, asserted via the

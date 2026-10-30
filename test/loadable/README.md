@@ -18,7 +18,7 @@ make                                    # build the loadable artifact first
 DUCKDB=/path/to/stock/duckdb ./test/loadable/run.sh
 ```
 
-The `DUCKDB` CLI must be a stock DuckDB matching the build's version (**v1.5.5**) — e.g. the
+The `DUCKDB` CLI must be a stock DuckDB matching the build's version (**v1.5.6**) — e.g. the
 official release CLI, or a system install. Overrides: `DUCKDB` (stock CLI), `EXT` (artifact path).
 
 In CI this runs in the **Extension smoke tests** workflow, which downloads the official DuckDB CLI

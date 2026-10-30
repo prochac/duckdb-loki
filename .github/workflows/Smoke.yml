@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 env:
-  DUCKDB_VERSION: v1.5.5 # keep in sync with MainDistributionPipeline.yml
+  DUCKDB_VERSION: v1.5.6 # keep in sync with MainDistributionPipeline.yml
 
 jobs:
   smoke:
@@ -45,7 +45,7 @@ jobs:
 
       # The runner's shallow submodule checkout has no tags, so DuckDB's `git describe`
       # fails and the loadable artifact would be stamped with the dummy version v0.0.1,
-      # which a stock v1.5.5 CLI then refuses to LOAD. Pin the version explicitly.
+      # which a stock v1.5.6 CLI then refuses to LOAD. Pin the version explicitly.
       - name: Build extension
         run: OVERRIDE_GIT_DESCRIBE=${DUCKDB_VERSION} make
 

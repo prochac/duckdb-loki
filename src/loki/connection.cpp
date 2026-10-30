@@ -82,6 +82,29 @@ void ReadLokiSecret(const KeyValueSecret &kv, std::string &endpoint, loki::AuthC
 	}
 }
 
+// The `loki` secret for a call that names none: the best match for `path`, or null. DuckDB names an
+// unnamed CREATE SECRET (TYPE loki, ...) `__default_loki`, and empty-scope secrets match any path at
+// the lowest score. DuckDB 2.0 breaks equal-score ties by case-insensitive name, where `_` sorts
+// after every letter, so the default would lose to any other unscoped secret (e.g. one from the env
+// provider) and the call would silently take that secret's endpoint and credentials. Prefer the
+// default on a tie, as DuckDB 1.5's byte-wise name order did; a better-matching scope still wins.
+unique_ptr<SecretEntry> LookupBestLokiSecret(SecretManager &secret_manager, CatalogTransaction transaction,
+                                             const std::string &path) {
+	auto match = secret_manager.LookupSecret(transaction, path, "loki");
+	if (!match.HasMatch()) {
+		return nullptr;
+	}
+	auto best_score = match.GetSecret().MatchScore(path);
+	for (auto &entry : secret_manager.AllSecrets(transaction)) {
+		const auto &secret = *entry.secret;
+		if (secret.GetType() == "loki" && secret.GetName().GetIdentifierName() == "__default_loki" &&
+		    secret.MatchScore(path) == best_score) {
+			return make_uniq<SecretEntry>(entry);
+		}
+	}
+	return std::move(match.secret_entry);
+}
+
 // Convert a bound TIMESTAMP/TIMESTAMPTZ/VARCHAR parameter to a nanosecond Unix epoch.
 // Casting to TIMESTAMP yields UTC microseconds, which GetEpochNanoSeconds scales to ns.
 int64_t ValueToEpochNs(const Value &value) {
@@ -151,12 +174,10 @@ void ResolveLokiConnection(ClientContext &context, TableFunctionBindInput &input
 		}
 		ReadLokiSecret(RequireLokiSecret(*entry->secret, name, fn), endpoint, auth, secret_headers);
 	} else {
-		// No explicit secret: fall back to the best-matching `loki` secret for this endpoint. DuckDB
-		// names an unnamed CREATE SECRET (TYPE loki, ...) `__default_loki`, and empty-scope secrets
-		// match any path at the lowest score; ties go to the name that sorts first, upper-cased.
-		auto match = secret_manager.LookupSecret(transaction, inline_endpoint, "loki");
-		if (match.HasMatch()) {
-			ReadLokiSecret(RequireLokiSecret(match.GetSecret(), match.GetSecret().GetName().GetIdentifierName(), fn),
+		// No explicit secret: fall back to the best-matching `loki` secret for this endpoint.
+		auto entry = LookupBestLokiSecret(secret_manager, transaction, inline_endpoint);
+		if (entry) {
+			ReadLokiSecret(RequireLokiSecret(*entry->secret, entry->secret->GetName().GetIdentifierName(), fn),
 			               endpoint, auth, secret_headers);
 		}
 	}
@@ -254,9 +275,9 @@ void ResolveLokiConnectionFromOptions(ClientContext &context, const std::string 
 		// No secret name and an endpoint URL (or nothing): still honor a default `loki` secret for
 		// auth/tenant; the inline URL below overrides its endpoint. (Plain declaration + if, not a
 		// C++17 if-init statement — DuckDB's extension build is C++11 and CI rejects the extension.)
-		auto match = secret_manager.LookupSecret(transaction, inline_endpoint, "loki");
-		if (match.HasMatch()) {
-			ReadLokiSecret(RequireLokiSecret(match.GetSecret(), match.GetSecret().GetName().GetIdentifierName(), fn),
+		auto entry = LookupBestLokiSecret(secret_manager, transaction, inline_endpoint);
+		if (entry) {
+			ReadLokiSecret(RequireLokiSecret(*entry->secret, entry->secret->GetName().GetIdentifierName(), fn),
 			               endpoint, auth, secret_headers);
 		}
 	}

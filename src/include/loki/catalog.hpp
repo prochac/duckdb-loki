@@ -11,6 +11,7 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/storage/storage_extension.hpp"
+#include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/transaction/transaction.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
 
@@ -128,7 +129,7 @@ public:
 	string GetDBPath() override {
 		return config.endpoint;
 	}
-	string GetDefaultSchema() const override;
+	optional<Identifier> GetDefaultSchema() const override;
 
 private:
 	// Build a generation from a per-tenant label-column list (parallel to config.tenants).
@@ -203,6 +204,9 @@ public:
 		return nullptr;
 	}
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
+	const ColumnList &GetColumns() const override {
+		return columns;
+	}
 	TableStorageInfo GetStorageInfo(ClientContext &context) override {
 		return TableStorageInfo();
 	}
@@ -215,6 +219,8 @@ public:
 	}
 
 private:
+	// TableCatalogEntry no longer stores the column list; each virtual table owns its own.
+	ColumnList columns;
 	std::string endpoint;
 	loki::AuthConfig auth;
 	std::vector<std::string> label_columns;
@@ -231,6 +237,9 @@ public:
 		return nullptr;
 	}
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
+	const ColumnList &GetColumns() const override {
+		return columns;
+	}
 	TableStorageInfo GetStorageInfo(ClientContext &context) override {
 		return TableStorageInfo();
 	}
@@ -242,6 +251,8 @@ public:
 	}
 
 private:
+	// TableCatalogEntry no longer stores the column list; each virtual table owns its own.
+	ColumnList columns;
 	std::string endpoint;
 	loki::AuthConfig auth;
 };
@@ -259,6 +270,9 @@ public:
 		return nullptr;
 	}
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
+	const ColumnList &GetColumns() const override {
+		return columns;
+	}
 	TableStorageInfo GetStorageInfo(ClientContext &context) override {
 		return TableStorageInfo();
 	}
@@ -270,6 +284,8 @@ public:
 	}
 
 private:
+	// TableCatalogEntry no longer stores the column list; each virtual table owns its own.
+	ColumnList columns;
 	std::string endpoint;
 	loki::AuthConfig auth;
 	std::vector<std::string> label_columns;

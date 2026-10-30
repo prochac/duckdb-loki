@@ -149,7 +149,7 @@ vector<string> FetchLokiLabelNames(const std::string &endpoint, const loki::Auth
 // Add the `series` table's columns: one VARCHAR per promoted label, then the full labels MAP.
 void BuildLokiSeriesColumns(const std::vector<std::string> &label_columns, ColumnList &columns) {
 	for (const auto &label : label_columns) {
-		columns.AddColumn(ColumnDefinition(label, LogicalType::VARCHAR));
+		columns.AddColumn(ColumnDefinition(Identifier(label), LogicalType::VARCHAR));
 	}
 	columns.AddColumn(ColumnDefinition("labels", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)));
 }
@@ -249,7 +249,7 @@ void LokiSeriesScanFunction(ClientContext &context, TableFunctionInput &data_p, 
 		state.offset++;
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace
@@ -278,7 +278,7 @@ shared_ptr<const LokiCatalogSnapshot> LokiCatalog::BuildSnapshot(std::vector<std
 			tenant.label_columns = snapshot->label_columns[i];
 		}
 		CreateSchemaInfo schema_info;
-		schema_info.schema = tenant.schema_name;
+		schema_info.SetSchema(Identifier(tenant.schema_name));
 		snapshot->schemas.push_back(make_uniq<LokiSchemaEntry>(*this, schema_info, config, tenant));
 	}
 	return shared_ptr<const LokiCatalogSnapshot>(std::move(snapshot));
@@ -411,7 +411,7 @@ optional_ptr<SchemaCatalogEntry> LokiCatalog::LookupSchema(CatalogTransaction tr
 	const auto &name = schema_lookup.GetEntryName();
 	auto snapshot = PinnedSnapshot(transaction.transaction);
 	for (auto &schema : snapshot->schemas) {
-		if (StringUtil::CIEquals(schema->name, name)) {
+		if (StringUtil::CIEquals(schema->name.GetIdentifierName(), name)) {
 			return schema.get();
 		}
 	}
@@ -428,8 +428,8 @@ void LokiCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 	}
 }
 
-string LokiCatalog::GetDefaultSchema() const {
-	return config.tenants.empty() ? "public" : config.tenants.front().schema_name;
+optional<Identifier> LokiCatalog::GetDefaultSchema() const {
+	return Identifier(config.tenants.empty() ? string("public") : config.tenants.front().schema_name);
 }
 
 optional_ptr<CatalogEntry> LokiCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
@@ -468,18 +468,18 @@ LokiSchemaEntry::LokiSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, const
 		auth.tenant = tenant.tenant_id;
 	}
 
-	CreateTableInfo logs_info(catalog.GetName(), tenant.schema_name, "logs");
+	CreateTableInfo logs_info(QualifiedName(catalog.GetName(), Identifier(tenant.schema_name), "logs"));
 	BuildLokiLogsColumns(tenant.label_columns, logs_info.columns);
 	logs_table =
 	    make_uniq<LokiLogsTable>(catalog, *this, logs_info, catalog_config.endpoint, auth, tenant.label_columns);
 
 	// Optional exploration tables (DESIGN.md §3.6): `labels` (all label names) and `series`
 	// (matching series, selector-driven like `logs`).
-	CreateTableInfo labels_info(catalog.GetName(), tenant.schema_name, "labels");
+	CreateTableInfo labels_info(QualifiedName(catalog.GetName(), Identifier(tenant.schema_name), "labels"));
 	labels_info.columns.AddColumn(ColumnDefinition("label", LogicalType::VARCHAR));
 	labels_table = make_uniq<LokiLabelsTable>(catalog, *this, labels_info, catalog_config.endpoint, auth);
 
-	CreateTableInfo series_info(catalog.GetName(), tenant.schema_name, "series");
+	CreateTableInfo series_info(QualifiedName(catalog.GetName(), Identifier(tenant.schema_name), "series"));
 	BuildLokiSeriesColumns(tenant.label_columns, series_info.columns);
 	series_table = make_uniq<LokiSeriesTable>(catalog, *this, series_info, catalog_config.endpoint, std::move(auth),
 	                                          tenant.label_columns, catalog_config.series_max_rows);
@@ -562,8 +562,8 @@ void LokiSchemaEntry::Alter(CatalogTransaction, AlterInfo &) {
 
 LokiLogsTable::LokiLogsTable(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info,
                              std::string endpoint_p, loki::AuthConfig auth_p, std::vector<std::string> label_columns_p)
-    : TableCatalogEntry(catalog, schema, info), endpoint(std::move(endpoint_p)), auth(std::move(auth_p)),
-      label_columns(std::move(label_columns_p)) {
+    : TableCatalogEntry(catalog, schema, info), columns(info.columns.Copy()), endpoint(std::move(endpoint_p)),
+      auth(std::move(auth_p)), label_columns(std::move(label_columns_p)) {
 }
 
 TableFunction LokiLogsTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
@@ -591,7 +591,8 @@ TableFunction LokiLogsTable::GetScanFunction(ClientContext &context, unique_ptr<
 
 LokiLabelsTable::LokiLabelsTable(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info,
                                  std::string endpoint_p, loki::AuthConfig auth_p)
-    : TableCatalogEntry(catalog, schema, info), endpoint(std::move(endpoint_p)), auth(std::move(auth_p)) {
+    : TableCatalogEntry(catalog, schema, info), columns(info.columns.Copy()), endpoint(std::move(endpoint_p)),
+      auth(std::move(auth_p)) {
 }
 
 TableFunction LokiLabelsTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
@@ -611,8 +612,8 @@ TableFunction LokiLabelsTable::GetScanFunction(ClientContext &context, unique_pt
 LokiSeriesTable::LokiSeriesTable(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info,
                                  std::string endpoint_p, loki::AuthConfig auth_p,
                                  std::vector<std::string> label_columns_p, idx_t max_rows_p)
-    : TableCatalogEntry(catalog, schema, info), endpoint(std::move(endpoint_p)), auth(std::move(auth_p)),
-      label_columns(std::move(label_columns_p)), max_rows(max_rows_p) {
+    : TableCatalogEntry(catalog, schema, info), columns(info.columns.Copy()), endpoint(std::move(endpoint_p)),
+      auth(std::move(auth_p)), label_columns(std::move(label_columns_p)), max_rows(max_rows_p) {
 }
 
 TableFunction LokiSeriesTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
@@ -793,7 +794,7 @@ void LokiRefreshLabelsPragma(ClientContext &context, const FunctionParameters &p
 		return;
 	}
 	auto name = parameters.values[0].ToString();
-	auto db = database_manager.GetDatabase(context, name);
+	auto db = database_manager.GetDatabase(context, Identifier(name));
 	if (!db) {
 		throw CatalogException("PRAGMA loki_refresh_labels: no attached database named '%s'", name);
 	}

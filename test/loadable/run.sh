@@ -8,7 +8,7 @@
 # artifact or the unsigned-LOAD path this one covers. All assertions here are offline (bind /
 # DESCRIBE / error paths — no network, no Loki).
 #
-# Requires: a stock duckdb CLI matching the build's DuckDB version (v1.5.6), and a built extension.
+# Requires: a stock duckdb CLI matching the build's DuckDB version (v2.0.0), and a built extension.
 #   DUCKDB   path to a STOCK duckdb CLI (no loki linked)   (default: `duckdb` on PATH)
 #   EXT      path to the loadable extension                (default: <repo>/build/release/…)
 #

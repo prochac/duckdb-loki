@@ -59,7 +59,7 @@ void ResolveDiscoveryBounds(TableFunctionBindInput &input, int64_t &start_ns, in
 }
 
 unique_ptr<FunctionData> LokiLabelsBind(ClientContext &context, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<LokiDiscoveryBindData>();
 	result->kind = DiscoveryKind::LABELS;
 	ResolveLokiConnection(context, input, result->endpoint, result->auth, "loki_labels");
@@ -74,7 +74,7 @@ unique_ptr<FunctionData> LokiLabelsBind(ClientContext &context, TableFunctionBin
 }
 
 unique_ptr<FunctionData> LokiLabelValuesBind(ClientContext &context, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<LokiDiscoveryBindData>();
 	result->kind = DiscoveryKind::LABEL_VALUES;
 	ResolveLokiConnection(context, input, result->endpoint, result->auth, "loki_label_values");
@@ -99,7 +99,7 @@ unique_ptr<FunctionData> LokiLabelValuesBind(ClientContext &context, TableFuncti
 }
 
 unique_ptr<FunctionData> LokiSeriesBind(ClientContext &context, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<LokiDiscoveryBindData>();
 	result->kind = DiscoveryKind::SERIES;
 	ResolveLokiConnection(context, input, result->endpoint, result->auth, "loki_series");
@@ -177,21 +177,23 @@ void LokiDiscoveryFunction(ClientContext &context, TableFunctionInput &data_p, D
 			count++;
 		}
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // Connection/auth + optional time-window named parameters shared by all discovery functions.
 void AddDiscoveryNamedParameters(TableFunction &fn) {
-	fn.named_parameters["endpoint"] = LogicalType::VARCHAR;
-	fn.named_parameters["secret"] = LogicalType::VARCHAR;
-	fn.named_parameters["token"] = LogicalType::VARCHAR;
-	fn.named_parameters["username"] = LogicalType::VARCHAR;
-	fn.named_parameters["password"] = LogicalType::VARCHAR;
-	fn.named_parameters["tenant"] = LogicalType::VARCHAR;
-	fn.named_parameters["headers"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
-	// start/end accept TIMESTAMP, TIMESTAMPTZ, or INTERVAL (offset from now); omitted → Loki default.
-	fn.named_parameters["start"] = LogicalType::ANY;
-	fn.named_parameters["end"] = LogicalType::ANY;
+	fn.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("endpoint", LogicalType::VARCHAR)
+		    .Add("secret", LogicalType::VARCHAR)
+		    .Add("token", LogicalType::VARCHAR)
+		    .Add("username", LogicalType::VARCHAR)
+		    .Add("password", LogicalType::VARCHAR)
+		    .Add("tenant", LogicalType::VARCHAR)
+		    .Add("headers", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR))
+		    // start/end accept TIMESTAMP, TIMESTAMPTZ, or INTERVAL (offset from now); omitted → Loki default.
+		    .Add("start", LogicalType::ANY)
+		    .Add("end", LogicalType::ANY);
+	});
 }
 
 } // namespace
@@ -213,7 +215,8 @@ void RegisterLokiDiscoveryFunctions(ExtensionLoader &loader) {
 	                           LokiDiscoveryInitGlobal);
 	AddDiscoveryNamedParameters(label_values);
 	// A selector to restrict which series contribute values.
-	label_values.named_parameters["query"] = LogicalType::VARCHAR;
+	label_values.GetSignature().ExtendTypedKwargs(
+	    [](TypedKwargs &options) { options.Add("query", LogicalType::VARCHAR); });
 	loader.RegisterFunction(label_values);
 
 	// loki_series(match, ...) — GET /series, one MAP row per matching series.

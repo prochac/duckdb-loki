@@ -5,6 +5,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/parser/column_list.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
 #include <cstdint>

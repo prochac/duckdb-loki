@@ -62,12 +62,11 @@ struct LokiScanGlobalState : public GlobalTableFunctionState {
 // rejected by DuckDB's own comparison binding before it reaches us; this keeps that from being
 // load-bearing.)
 bool TryValueToEpochNsExact(const Value &value, int64_t &out) {
-	Value as_ns;
-	string error;
-	if (!value.DefaultTryCastAs(LogicalType::TIMESTAMP_NS, as_ns, &error) || as_ns.IsNull()) {
+	auto as_ns = value.DefaultTryCastAs(LogicalType::TIMESTAMP_NS);
+	if (!as_ns || as_ns->IsNull()) {
 		return false;
 	}
-	out = as_ns.GetValueUnsafe<int64_t>();
+	out = as_ns->GetValueUnsafe<int64_t>();
 	return true;
 }
 
@@ -76,7 +75,7 @@ bool TryValueToEpochNsExact(const Value &value, int64_t &out) {
 // label columns, and finally the output schema. The caller sets the query source (raw `query`
 // or `base_selector`) before calling this. The function name for error messages is `fn`.
 void LokiResolveCommon(ClientContext &context, TableFunctionBindInput &input, LokiScanBindData &result,
-                       vector<LogicalType> &return_types, vector<string> &names, const char *fn) {
+                       vector<LogicalType> &return_types, vector<Identifier> &names, const char *fn) {
 	result.fn_name = fn;
 	ResolveLokiConnection(context, input, result.endpoint, result.auth, fn);
 
@@ -147,7 +146,7 @@ void LokiResolveCommon(ClientContext &context, TableFunctionBindInput &input, Lo
 	names.emplace_back("line");
 	for (const auto &label : result.label_columns) {
 		return_types.push_back(LogicalType::VARCHAR);
-		names.push_back(label);
+		names.emplace_back(label);
 	}
 	return_types.push_back(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
 	names.emplace_back("labels");
@@ -156,7 +155,7 @@ void LokiResolveCommon(ClientContext &context, TableFunctionBindInput &input, Lo
 }
 
 unique_ptr<FunctionData> LokiScanBind(ClientContext &context, TableFunctionBindInput &input,
-                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<LokiScanBindData>();
 
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
@@ -169,7 +168,7 @@ unique_ptr<FunctionData> LokiScanBind(ClientContext &context, TableFunctionBindI
 }
 
 unique_ptr<FunctionData> LokiBind(ClientContext &context, TableFunctionBindInput &input,
-                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<LokiScanBindData>();
 	result->pushdown_mode = true;
 
@@ -196,8 +195,8 @@ unique_ptr<FunctionData> LokiBind(ClientContext &context, TableFunctionBindInput
 // column is compared against a TIMESTAMPTZ constant) to reach the underlying BoundColumnRef.
 const Expression &StripCast(const Expression &expr) {
 	const Expression *cur = &expr;
-	while (cur->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-		cur = cur->Cast<BoundCastExpression>().child.get();
+	while (BoundCastExpression::IsCast(*cur)) {
+		cur = &BoundCastExpression::Child(cur->Cast<BoundFunctionExpression>());
 	}
 	return *cur;
 }
@@ -211,7 +210,7 @@ bool ResolveColumnName(const Expression &expr, const LogicalGet &get, std::strin
 	}
 	auto &colref = inner.Cast<BoundColumnRefExpression>();
 	const auto &column_ids = get.GetColumnIds();
-	idx_t proj = colref.binding.column_index;
+	idx_t proj = colref.Binding().column_index;
 	if (proj >= column_ids.size()) {
 		return false;
 	}
@@ -219,7 +218,7 @@ bool ResolveColumnName(const Expression &expr, const LogicalGet &get, std::strin
 	if (storage >= get.names.size()) {
 		return false;
 	}
-	name = get.names[storage];
+	name = get.names[storage].GetIdentifierName();
 	return true;
 }
 
@@ -248,16 +247,18 @@ void AddEndBound(LokiScanBindData &bind_data, int64_t ns) {
 // (may be erased); returns false to leave it as a residual — including the cases where we push a
 // coarse bound to Loki but still need DuckDB to apply the exact predicate.
 bool TryComparison(ClientContext &context, const LogicalGet &get, LokiScanBindData &bind_data,
-                   const BoundComparisonExpression &cmp) {
+                   const BoundFunctionExpression &cmp) {
 	ExpressionType op = cmp.GetExpressionType();
+	const Expression &left = BoundComparisonExpression::Left(cmp);
+	const Expression &right = BoundComparisonExpression::Right(cmp);
 	std::string col_name;
 	Value constant;
 
 	// Find the column side and the constant side (in either order); flip the operator if the
 	// column is on the right so `op` always reads column-<op>-constant.
-	if (ResolveColumnName(*cmp.left, get, col_name) && EvalConstant(context, *cmp.right, constant)) {
+	if (ResolveColumnName(left, get, col_name) && EvalConstant(context, right, constant)) {
 		// column <op> constant
-	} else if (ResolveColumnName(*cmp.right, get, col_name) && EvalConstant(context, *cmp.left, constant)) {
+	} else if (ResolveColumnName(right, get, col_name) && EvalConstant(context, left, constant)) {
 		op = FlipComparisonExpression(op);
 	} else {
 		return false;
@@ -326,17 +327,17 @@ bool TryComparison(ClientContext &context, const LogicalGet &get, LokiScanBindDa
 // Try to translate a WHERE `col IN (a, b, ...)` on a label column into a `{l=~"a|b"}` matcher.
 bool TryInList(ClientContext &context, const LogicalGet &get, LokiScanBindData &bind_data,
                const BoundOperatorExpression &op) {
-	if (op.GetExpressionType() != ExpressionType::COMPARE_IN || op.children.size() < 2) {
+	if (op.GetExpressionType() != ExpressionType::COMPARE_IN || op.GetChildren().size() < 2) {
 		return false;
 	}
 	std::string col_name;
-	if (!ResolveColumnName(*op.children[0], get, col_name) || !IsLabelColumn(bind_data, col_name)) {
+	if (!ResolveColumnName(*op.GetChildren()[0], get, col_name) || !IsLabelColumn(bind_data, col_name)) {
 		return false;
 	}
 	std::string regex;
-	for (idx_t i = 1; i < op.children.size(); i++) {
+	for (idx_t i = 1; i < op.GetChildren().size(); i++) {
 		Value value;
-		if (!EvalConstant(context, *op.children[i], value)) {
+		if (!EvalConstant(context, *op.GetChildren()[i], value)) {
 			return false; // a non-constant member — cannot translate the whole IN
 		}
 		if (!regex.empty()) {
@@ -372,7 +373,7 @@ loki::LineOp NegateLineOp(loki::LineOp op) {
 // enclosing boolean NOT. Without this, line-filter pushdown (DESIGN.md §4.1) silently never fires.
 bool TryFunction(ClientContext &context, const LogicalGet &get, LokiScanBindData &bind_data,
                  const BoundFunctionExpression &func, bool negated) {
-	const std::string &fname = func.function.name;
+	const std::string &fname = func.Function().GetName().GetIdentifierName();
 	const bool is_like = fname == "~~";
 	const bool is_not_like = fname == "!~~";
 	const bool is_regexp = fname == "regexp_matches";
@@ -380,16 +381,16 @@ bool TryFunction(ClientContext &context, const LogicalGet &get, LokiScanBindData
 	const bool is_prefix = fname == "prefix";
 	const bool is_suffix = fname == "suffix";
 	if ((!is_like && !is_not_like && !is_regexp && !is_contains && !is_prefix && !is_suffix) ||
-	    func.children.size() != 2) {
+	    func.GetChildren().size() != 2) {
 		return false;
 	}
 
 	std::string col_name;
-	if (!ResolveColumnName(*func.children[0], get, col_name)) {
+	if (!ResolveColumnName(*func.GetChildren()[0], get, col_name)) {
 		return false;
 	}
 	Value pattern;
-	if (!EvalConstant(context, *func.children[1], pattern)) {
+	if (!EvalConstant(context, *func.GetChildren()[1], pattern)) {
 		return false;
 	}
 
@@ -444,24 +445,28 @@ void LokiPushdownComplexFilter(ClientContext &context, LogicalGet &get, Function
 	for (auto &filter : filters) {
 		bool consumed = false;
 		switch (filter->GetExpressionClass()) {
-		case ExpressionClass::BOUND_COMPARISON:
-			consumed = TryComparison(context, get, bind_data, filter->Cast<BoundComparisonExpression>());
-			break;
 		case ExpressionClass::BOUND_OPERATOR: {
 			auto &op_expr = filter->Cast<BoundOperatorExpression>();
 			// `NOT LIKE` reaches us as `NOT contains/prefix/suffix(line, …)` (the LIKE optimizer
 			// wraps the rewritten function in a boolean NOT); unwrap it and negate the line filter.
-			if (op_expr.GetExpressionType() == ExpressionType::OPERATOR_NOT && op_expr.children.size() == 1 &&
-			    op_expr.children[0]->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
-				consumed = TryFunction(context, get, bind_data, op_expr.children[0]->Cast<BoundFunctionExpression>(),
-				                       /*negated=*/true);
+			if (op_expr.GetExpressionType() == ExpressionType::OPERATOR_NOT && op_expr.GetChildren().size() == 1 &&
+			    op_expr.GetChildren()[0]->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+				consumed =
+				    TryFunction(context, get, bind_data, op_expr.GetChildren()[0]->Cast<BoundFunctionExpression>(),
+				                /*negated=*/true);
 			} else {
 				consumed = TryInList(context, get, bind_data, op_expr);
 			}
 			break;
 		}
 		case ExpressionClass::BOUND_FUNCTION:
-			consumed = TryFunction(context, get, bind_data, filter->Cast<BoundFunctionExpression>(), /*negated=*/false);
+			// Comparisons are bound as function expressions too, told apart by their expression type.
+			if (BoundComparisonExpression::IsComparison(*filter)) {
+				consumed = TryComparison(context, get, bind_data, filter->Cast<BoundFunctionExpression>());
+			} else {
+				consumed = TryFunction(context, get, bind_data, filter->Cast<BoundFunctionExpression>(),
+				                       /*negated=*/false);
+			}
 			break;
 		default:
 			break;
@@ -567,7 +572,7 @@ void LokiScanFunction(ClientContext &context, TableFunctionInput &data_p, DataCh
 			if (src == 0) {
 				// TIMESTAMP_NS is stored as raw nanoseconds (do NOT use Timestamp::FromEpochNanoSeconds,
 				// which rescales to microseconds for the µs TIMESTAMP type).
-				FlatVector::GetData<int64_t>(vec)[count] = row.ts_ns;
+				FlatVector::GetDataMutable<int64_t>(vec)[count] = row.ts_ns;
 			} else if (src == 1) {
 				vec.SetValue(count, Value(row.line));
 			} else if (src < labels_map_col) {
@@ -586,26 +591,28 @@ void LokiScanFunction(ClientContext &context, TableFunctionInput &data_p, DataCh
 		count++;
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // Named parameters shared by loki_scan and loki (connection/auth, time window, paging, labels).
 void AddCommonNamedParameters(TableFunction &fn) {
-	fn.named_parameters["endpoint"] = LogicalType::VARCHAR;
-	fn.named_parameters["secret"] = LogicalType::VARCHAR;
-	fn.named_parameters["token"] = LogicalType::VARCHAR;
-	fn.named_parameters["username"] = LogicalType::VARCHAR;
-	fn.named_parameters["password"] = LogicalType::VARCHAR;
-	fn.named_parameters["tenant"] = LogicalType::VARCHAR;
-	fn.named_parameters["headers"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
-	// start/end accept TIMESTAMP, TIMESTAMPTZ, or INTERVAL (offset from now); typed ANY and
-	// dispatched at bind time.
-	fn.named_parameters["start"] = LogicalType::ANY;
-	fn.named_parameters["end"] = LogicalType::ANY;
-	fn.named_parameters["limit"] = LogicalType::BIGINT;
-	fn.named_parameters["direction"] = LogicalType::VARCHAR;
-	// labels := ['job','level'] promotes labels to top-level VARCHAR columns (DESIGN.md §3.2).
-	fn.named_parameters["labels"] = LogicalType::LIST(LogicalType::VARCHAR);
+	fn.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("endpoint", LogicalType::VARCHAR)
+		    .Add("secret", LogicalType::VARCHAR)
+		    .Add("token", LogicalType::VARCHAR)
+		    .Add("username", LogicalType::VARCHAR)
+		    .Add("password", LogicalType::VARCHAR)
+		    .Add("tenant", LogicalType::VARCHAR)
+		    .Add("headers", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR))
+		    // start/end accept TIMESTAMP, TIMESTAMPTZ, or INTERVAL (offset from now); typed ANY and
+		    // dispatched at bind time.
+		    .Add("start", LogicalType::ANY)
+		    .Add("end", LogicalType::ANY)
+		    .Add("limit", LogicalType::BIGINT)
+		    .Add("direction", LogicalType::VARCHAR)
+		    // labels := ['job','level'] promotes labels to top-level VARCHAR columns (DESIGN.md §3.2).
+		    .Add("labels", LogicalType::LIST(LogicalType::VARCHAR));
+	});
 	// Projection pushdown (DESIGN.md §6.3): only build the columns the query selects.
 	fn.projection_pushdown = true;
 }
@@ -647,7 +654,7 @@ void BuildLokiLogsColumns(const std::vector<std::string> &label_columns, ColumnL
 	columns.AddColumn(ColumnDefinition("timestamp", LogicalType::TIMESTAMP_NS));
 	columns.AddColumn(ColumnDefinition("line", LogicalType::VARCHAR));
 	for (const auto &label : label_columns) {
-		columns.AddColumn(ColumnDefinition(label, LogicalType::VARCHAR));
+		columns.AddColumn(ColumnDefinition(Identifier(label), LogicalType::VARCHAR));
 	}
 	columns.AddColumn(ColumnDefinition("labels", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)));
 	columns.AddColumn(
@@ -665,7 +672,7 @@ void RegisterLokiScanFunction(ExtensionLoader &loader) {
 	// into the LogQL selector, time bounds, and line filters via pushdown_complex_filter.
 	TableFunction loki("loki", {}, LokiScanFunction, LokiBind, LokiScanInitGlobal);
 	AddCommonNamedParameters(loki);
-	loki.named_parameters["selector"] = LogicalType::VARCHAR;
+	loki.GetSignature().ExtendTypedKwargs([](TypedKwargs &options) { options.Add("selector", LogicalType::VARCHAR); });
 	loki.pushdown_complex_filter = LokiPushdownComplexFilter;
 	loader.RegisterFunction(loki);
 }

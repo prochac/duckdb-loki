@@ -43,7 +43,7 @@ Filter DuckDB C++ unit tests by tag, e.g. `[sql]`:
 
 Requires submodules (`git submodule update --init --recursive`) — `duckdb/` and
 `extension-ci-tools/` are pinned and provide the build system. DuckDB target version is
-**v1.5.6** (see the workflow files); the C++ extension API is version-tied, so signatures
+**v2.0.0** (see the workflow files); the C++ extension API is version-tied, so signatures
 must be copied from the checked-out `duckdb/` source, not from docs/memory.
 
 ## Dependencies (vcpkg)

@@ -383,9 +383,13 @@ release line. `INSTALL` picks the right one for the DuckDB you run:
 
 The loki version tracks the extension's own features, not DuckDB's version.
 
-### Installing the deployed binaries
-To install extension binaries from a custom repository, launch DuckDB with
-`allow_unsigned_extensions` set to true.
+### Loading an unsigned build
+Outside community-extensions, the binary is unsigned: either one you built
+(`build/release/extension/loki/loki.duckdb_extension`), or one downloaded from the artifacts of a
+**Main Extension Distribution Pipeline** run (GitHub keeps those for 90 days). Its DuckDB version
+must match yours exactly. Launch
+DuckDB with `allow_unsigned_extensions` set to true. It is a startup setting, so a `SET` in a
+running session is too late.
 
 CLI:
 ```shell
@@ -402,17 +406,9 @@ NodeJS:
 db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
 ```
 
-Then set the repository endpoint to the HTTP URL of your bucket + extension version:
+Then load the file by path:
 ```sql
-SET custom_extension_repository='bucket.s3.eu-west-1.amazonaws.com/loki/latest';
-```
-The `/latest` path installs the latest version available for your DuckDB version. To pin a
-version, pass it instead of `latest`.
-
-After these steps, install and load with the regular commands:
-```sql
-INSTALL loki;
-LOAD loki;
+LOAD '/path/to/loki.duckdb_extension';
 ```
 
 ## Setting up CLion

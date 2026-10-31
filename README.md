@@ -364,13 +364,24 @@ on demand via the **Integration (Docker Loki)** workflow.
 
 ### Installing from community-extensions
 
-Once the [community-extensions](https://github.com/duckdb/community-extensions) submission is
-accepted, the canonical install is a signed one-liner (no `-unsigned` needed):
+loki is published in [community-extensions](https://github.com/duckdb/community-extensions), so the
+canonical install is a signed one-liner (no `-unsigned` needed):
 
 ```sql
 INSTALL loki FROM community;
 LOAD loki;
 ```
+
+DuckDB's C++ extension API is tied to the DuckDB version, so each DuckDB line gets its own loki
+release line. `INSTALL` picks the right one for the DuckDB you run:
+
+| DuckDB | loki | Source |
+|---|---|---|
+| 2.0.x | 2.x | `main` |
+| 1.5.x | 1.2.x (bug and security fixes only, until DuckDB 1.5's end of life in March 2027) | `v1` branch |
+| 1.4.x and older | not supported | — |
+
+The loki version tracks the extension's own features, not DuckDB's version.
 
 ### Installing the deployed binaries
 To install extension binaries from a custom repository, launch DuckDB with
